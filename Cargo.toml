@@ -1,0 +1,43 @@
+[package]
+name = "rust_test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+futures = "0.3.31"
+hmac = "0.12.1"
+async-trait = "0.1.68"
+nalgebra = "0.34.1"
+rand = "0.9.2"  # 用于生成随机数示例
+reqwest = "0.12.24"
+sha2 = "0.10.9"
+tokio = { version = "1.47.1", features = ["full"] }
+tokio-stream = "0.1.17"
+tracing = "0.1.41"
+tracing-subscriber = "0.3.20"
+url = "2.5.7"
+winit = "0.30.12"
+aes = "0.8.4"
+block-modes = "0.9.1"
+pbkdf2 = "0.12.2"
+
+[profile.release]
+# opt-level = "z"        # 优先优化体积（比"3"更小，牺牲部分速度）
+lto = true             # 链接时优化（跨模块优化，显著减小体积）
+codegen-units = 1      # 单代码生成单元（利于LTO优化，编译变慢但体积更小）
+panic = "abort"        #  panic时直接终止（移除unwind回溯代码，节省体积）
+strip = true           # 移除调试符号（release模式下有效）
+debug = false          # 关闭调试信息
+
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+  "-C", "target-feature=+crt-static",  # 静态链接 MSVC 运行时（关键）
+]
+
+# 针对 Windows GNU 工具链（x86_64-pc-windows-gnu，若你用 MinGW）
+[target.x86_64-pc-windows-gnu]
+rustflags = [
+  "-C", "target-feature=+crt-static",  # 静态链接 MinGW 运行时
+  "-C", "link-arg=-Wl,--allow-multiple-definition",  # GNU 专属兼容选项
+]
