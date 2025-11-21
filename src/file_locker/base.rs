@@ -4,8 +4,9 @@ use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use sha2::{Sha256, Digest};
 use hmac::{Hmac, Mac};
-use std::sync::Arc;
-use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
+use std::sync::{Arc, Mutex};
+use tokio::sync::{Semaphore};
 use async_trait::async_trait;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -137,35 +138,52 @@ pub async fn write_trailer<P: AsRef<Path>>(
     path: P, locker_id: [u8;TRAITER_ID_LEN], password: &str
 ) -> tokio::io::Result<()> {
 
-    // 以可读写方式打开
-    let mut file = File::options().read(true).write(true).open(&path).await?;
-    let meta = file.metadata().await?;
-    let file_len = meta.len();
+    // 打开可读写的同一个文件句柄（后续不再 reopen）
+    let path_ref = path.as_ref();
+    let mut file = File::options().read(true).write(true).open(path_ref).await?;
+    let mut meta = file.metadata().await?;
+    let mut file_len = meta.len();
 
-    // 仅当文件确实已经包含尾标时才截断旧尾标
-    // （复用你已有的 read_trailer_if_exists）
-    let content_len = if file_len >= TRAILER_LEN as u64 {
-        if let Ok(Some(_)) = read_trailer_if_exists(&path).await {
-            // 文件尾确实有旧 trailer，移除它
-            file.set_len(file_len - TRAILER_LEN as u64).await?;
-            file_len - TRAILER_LEN as u64
+    // 如果文件尾确实包含旧 trailer，就截断旧 trailer（用当前句柄）
+    if file_len >= TRAILER_LEN as u64 {
+        // 读取末尾判断是否为旧 trailer（直接用 file）
+        let mut tail = vec![0u8; TRAILER_LEN];
+        file.seek(std::io::SeekFrom::End(-(TRAILER_LEN as i64))).await?;
+        if let Ok(_) = file.read_exact(&mut tail).await {
+            let finish_tag = &tail[(TRAITER_ID_LEN + TRAITER_TAG_LEN)..];
+            if finish_tag == TRAILER_FINISH_TAG {
+                // 截断旧尾标：注意 set_len 会改变文件长度
+                file.set_len(file_len - TRAILER_LEN as u64).await?;
+                file_len = file_len - TRAILER_LEN as u64;
+            } else {
+                // 如果不是旧尾标，不做截断；恢复到文件末尾准备追加
+                file.seek(std::io::SeekFrom::End(0)).await?;
+            }
         } else {
-            // 无旧 trailer，保持原文件长度
-            file_len
+            // 如果读取失败，回到文件末尾
+            file.seek(std::io::SeekFrom::End(0)).await?;
         }
-    } else {
-        file_len
-    };
+    }
 
-    // 重新计算 tag（在截断旧尾标后的内容上算）
-    let mut file2 = File::options().read(true).open(&path).await?;
-    let tag = compute_tag_with_len(&mut file2, password, content_len).await?;
+    // 再次获取实际内容长度（以防 set_len 改变）
+    meta = file.metadata().await?;
+    let content_len = meta.len();
 
-    // 追加 tail（locker_id + tag + finish_tag）
+    // 确保内容已刷新到磁盘（尽量减少缓冲引起的不一致）
+    file.sync_all().await.ok();
+
+    // 计算 tag（在同一个 file handle 上）
+    let tag = compute_tag_with_len(&mut file, password, content_len).await?;
+
+    // 追加尾标（locker_id + tag + finish_tag）
     file.seek(std::io::SeekFrom::End(0)).await?;
     file.write_all(&locker_id).await?;
     file.write_all(&tag).await?;
     file.write_all(&TRAILER_FINISH_TAG).await?;
+
+    // 强制 flush
+    file.sync_all().await?;
+
     Ok(())
 }
 
@@ -200,25 +218,37 @@ pub async fn verify_trailer<P: AsRef<Path>>(
     path: P, expected_locker_id: [u8;4], password: &str
 ) -> tokio::io::Result<bool> {
 
-    // 读取尾标
-    let Some((stored_locker_id, stored_tag)) = read_trailer_if_exists(&path).await? else {
-        return Ok(false);
-    };
+    let path_ref = path.as_ref();
+    let mut file = File::options().read(true).open(path_ref).await?;
+    let metadata = file.metadata().await?;
+    let file_len = metadata.len();
 
-    // ID 不匹配直接 false
-    if stored_locker_id != expected_locker_id {
+    if file_len < TRAILER_LEN as u64 {
         return Ok(false);
     }
 
-    // 重新计算 tag
-    let metadata = tokio::fs::metadata(&path).await?;
-    let file_len = metadata.len();
+    // 读取尾部
+    file.seek(std::io::SeekFrom::End(-(TRAILER_LEN as i64))).await?;
+    let mut buf = vec![0u8; TRAILER_LEN];
+    file.read_exact(&mut buf).await?;
+
+    let stored_locker_id: [u8; TRAITER_ID_LEN] = buf[..TRAITER_ID_LEN].try_into().unwrap();
+    if stored_locker_id != expected_locker_id {
+        return Ok(false);
+    }
+    let stored_tag: [u8; TRAITER_TAG_LEN] = buf[TRAITER_ID_LEN..TRAITER_ID_LEN + TRAITER_TAG_LEN].try_into().unwrap();
+    let finish_tag: [u8; TRAILER_FINISH_TAG_LEN] = buf[(TRAITER_ID_LEN + TRAITER_TAG_LEN)..].try_into().unwrap();
+    if finish_tag != TRAILER_FINISH_TAG {
+        return Ok(false);
+    }
+
+    // content_len = file_len - TRAILER_LEN
     let content_len = file_len - TRAILER_LEN as u64;
 
-    let mut file = File::options().read(true).open(&path).await?;
-    let computed_tag = compute_tag_with_len(&mut file, password, content_len).await?;
+    // 计算 tag：在同一个 file 上从头读取 header
+    let computed = compute_tag_with_len(&mut file, password, content_len).await?;
 
-    Ok(stored_tag == computed_tag)
+    Ok(stored_tag == computed)
 }
 
 
@@ -236,6 +266,7 @@ pub struct DirLockManager {
     dir_path: PathBuf,
     password: String,
     locker: Arc<dyn Locker>,
+    joinset: Arc<Mutex<JoinSet<()>>>,
 }
 
 impl DirLockManager {
@@ -249,43 +280,67 @@ impl DirLockManager {
             dir_path: dir_path.as_ref().to_path_buf(),
             password,
             locker: Arc::new(locker),
+            joinset: Arc::new(Mutex::new(JoinSet::new())),
+        }
+    }
+
+    /// 等待所有 spawn 的任务执行完
+    pub async fn wait_all(&self) {
+        let mut set = self.joinset.lock().unwrap();
+        while let Some(res) = set.join_next().await {
+            if let Err(e) = res {
+                eprintln!("后台任务 panic: {}", e);
+            }
         }
     }
 
     pub async fn lock(&self) {
+        let j = self.joinset.clone();
+
         if let Err(e) = scan_files_iterative(&self.dir_path, move |file_path| {
-            let permit_fut = self.semaphore.clone().acquire_owned();
+            let sem = self.semaphore.clone();
             let pwd2 = self.password.clone();
             let locker2 = self.locker.clone();
 
-            tokio::spawn(async move {
-                let _permit = permit_fut.await.expect("semaphore closed");
+            // 把任务加入 JoinSet
+            let mut set = j.lock().unwrap();
+            set.spawn(async move {
+                let _permit = sem.acquire().await.expect("semaphore closed");
 
                 if let Err(e) = locker2.lock(file_path, pwd2).await {
-                    eprintln!("处理文件 时出错: {}", e);
+                    eprintln!("加密文件时出错: {}", e);
                 }
             });
         }).await {
             eprintln!("扫描目录时出错: {}", e);
         }
+
+        // 等待全部完成
+        self.wait_all().await;
     }
 
     pub async fn unlock(&self) {
+        let j = self.joinset.clone();
+
         if let Err(e) = scan_files_iterative(&self.dir_path, move |file_path| {
-            let permit_fut = self.semaphore.clone().acquire_owned();
+            let sem = self.semaphore.clone();
             let pwd2 = self.password.clone();
             let locker2 = self.locker.clone();
 
-            tokio::spawn(async move {
-                let _permit = permit_fut.await.expect("semaphore closed");
+            let mut set = j.lock().unwrap();
+            set.spawn(async move {
+                let _permit = sem.acquire().await.expect("semaphore closed");
 
                 if let Err(e) = locker2.unlock(file_path, pwd2).await {
-                    eprintln!("处理文件 时出错: {}", e);
+                    eprintln!("解密文件时出错: {}", e);
                 }
             });
         }).await {
             eprintln!("扫描目录时出错: {}", e);
         }
+
+        // 等待全部完成
+        self.wait_all().await;
     }
 }
 
