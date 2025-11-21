@@ -35,8 +35,10 @@ impl AesLocker {
     fn encrypt_data(data: &[u8], password: &str) -> Result<Vec<u8>, String> {
         // 生成随机盐和IV
         let mut rng = rand::rng();
-        let salt: [u8; SALT_LENGTH] = rng.random();
-        let iv: [u8; IV_LENGTH] = rng.random();
+        let mut salt = [0u8; SALT_LENGTH];
+        let mut iv = [0u8; IV_LENGTH];
+        rng.fill(&mut salt);
+        rng.fill(&mut iv);
 
         // 派生密钥
         let key = Self::derive_key(password, &salt);
@@ -581,5 +583,358 @@ mod tests {
         if let Ok(decrypted) = result {
             assert_ne!(decrypted, data);
         }
+    }
+
+    // ====== 文件加密解密测试 ======
+
+    #[tokio::test]
+    async fn test_lock_unlock_file_basic() {
+        let locker = AesLocker::new();
+        let password = "test_password_123";
+        
+        // 创建临时文件
+        let temp_file = std::env::temp_dir().join(format!(
+            "aes_test_basic_{}.txt",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        
+        let original_content = b"Hello, this is a test file content!";
+        fs::write(&temp_file, original_content).await.unwrap();
+
+        // 加密文件
+        locker.lock_inner(temp_file.clone(), password.to_string())
+            .await
+            .expect("Failed to lock file");
+
+        // 验证加密后文件内容已改变
+        let encrypted_content = fs::read(&temp_file).await.unwrap();
+        assert_ne!(&encrypted_content, original_content);
+
+        // 解密文件
+        locker.unlock_inner(temp_file.clone(), password.to_string())
+            .await
+            .expect("Failed to unlock file");
+
+        // 验证解密后内容与原始内容相同
+        let decrypted_content = fs::read(&temp_file).await.unwrap();
+        assert_eq!(decrypted_content, original_content);
+
+        // 清理
+        fs::remove_file(&temp_file).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_lock_unlock_empty_file() {
+        let locker = AesLocker::new();
+        let password = "empty_file_pwd";
+        
+        let temp_file = std::env::temp_dir().join(format!(
+            "aes_test_empty_{}.txt",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        
+        // 创建空文件
+        fs::write(&temp_file, b"").await.unwrap();
+
+        // 加密空文件
+        locker.lock_inner(temp_file.clone(), password.to_string())
+            .await
+            .expect("Failed to lock empty file");
+
+        // 解密
+        locker.unlock_inner(temp_file.clone(), password.to_string())
+            .await
+            .expect("Failed to unlock empty file");
+
+        // 验证仍然是空文件
+        let result = fs::read(&temp_file).await.unwrap();
+        assert_eq!(result, b"");
+
+        fs::remove_file(&temp_file).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_lock_unlock_large_file() {
+        let locker = AesLocker::new();
+        let password = "large_file_pwd";
+        
+        let temp_file = std::env::temp_dir().join(format!(
+            "aes_test_large_{}.bin",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        
+        // 创建1MB的文件
+        let large_content: Vec<u8> = (0..1024 * 1024)
+            .map(|i| (i % 256) as u8)
+            .collect();
+        
+        fs::write(&temp_file, &large_content).await.unwrap();
+
+        // 加密大文件
+        locker.lock_inner(temp_file.clone(), password.to_string())
+            .await
+            .expect("Failed to lock large file");
+
+        // 解密
+        locker.unlock_inner(temp_file.clone(), password.to_string())
+            .await
+            .expect("Failed to unlock large file");
+
+        // 验证内容相同
+        let decrypted = fs::read(&temp_file).await.unwrap();
+        assert_eq!(decrypted, large_content);
+
+        fs::remove_file(&temp_file).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_lock_file_wrong_password_unlock_fails() {
+        let locker = AesLocker::new();
+        let password = "correct_pwd";
+        let wrong_password = "wrong_pwd";
+        
+        let temp_file = std::env::temp_dir().join(format!(
+            "aes_test_wrongpwd_{}.txt",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        
+        let original_content = b"Secret content that should not be readable with wrong password";
+        fs::write(&temp_file, original_content).await.unwrap();
+
+        // 使用正确密码加密
+        locker.lock_inner(temp_file.clone(), password.to_string())
+            .await
+            .expect("Failed to lock file");
+
+        // 尝试用错误密码解密
+        let result = locker.unlock_inner(temp_file.clone(), wrong_password.to_string())
+            .await;
+
+        // 解密应该失败或产生不同的结果
+        match result {
+            Err(_) => {
+                // 解密错误是预期的行为
+            }
+            Ok(_) => {
+                // 如果解密成功，内容应该与原始内容不同
+                let corrupted_content = fs::read(&temp_file).await.unwrap();
+                assert_ne!(corrupted_content, original_content);
+            }
+        }
+
+        fs::remove_file(&temp_file).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_lock_unlock_binary_file() {
+        let locker = AesLocker::new();
+        let password = "binary_file_pwd";
+        
+        let temp_file = std::env::temp_dir().join(format!(
+            "aes_test_binary_{}.bin",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        
+        // 创建包含所有字节值的二进制文件
+        let binary_content: Vec<u8> = (0..=255)
+            .cycle()
+            .take(10000)
+            .collect();
+        
+        fs::write(&temp_file, &binary_content).await.unwrap();
+
+        // 加密和解密
+        locker.lock_inner(temp_file.clone(), password.to_string())
+            .await
+            .expect("Failed to lock binary file");
+
+        locker.unlock_inner(temp_file.clone(), password.to_string())
+            .await
+            .expect("Failed to unlock binary file");
+
+        let decrypted = fs::read(&temp_file).await.unwrap();
+        assert_eq!(decrypted, binary_content);
+
+        fs::remove_file(&temp_file).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_lock_unlock_file_multiple_times() {
+        let locker = AesLocker::new();
+        let password = "repeat_pwd";
+        
+        let temp_file = std::env::temp_dir().join(format!(
+            "aes_test_repeat_{}.txt",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        
+        let original_content = b"Content for multiple lock/unlock cycles";
+        
+        // 进行多个加密解密循环
+        for i in 0..3 {
+            fs::write(&temp_file, original_content).await.unwrap();
+
+            locker.lock_inner(temp_file.clone(), password.to_string())
+                .await
+                .expect(&format!("Failed to lock file in cycle {}", i));
+
+            locker.unlock_inner(temp_file.clone(), password.to_string())
+                .await
+                .expect(&format!("Failed to unlock file in cycle {}", i));
+
+            let decrypted = fs::read(&temp_file).await.unwrap();
+            assert_eq!(decrypted, original_content, "Cycle {}: content mismatch", i);
+        }
+
+        fs::remove_file(&temp_file).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_lock_file_with_unicode_password() {
+        let locker = AesLocker::new();
+        let password = "密码🔐中文テスト";
+        
+        let temp_file = std::env::temp_dir().join(format!(
+            "aes_test_unicode_{}.txt",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        
+        let content = "Unicode password test: 你好世界";
+        fs::write(&temp_file, content).await.unwrap();
+
+        locker.lock_inner(temp_file.clone(), password.to_string())
+            .await
+            .expect("Failed to lock file with unicode password");
+
+        locker.unlock_inner(temp_file.clone(), password.to_string())
+            .await
+            .expect("Failed to unlock file with unicode password");
+
+        let decrypted = fs::read(&temp_file).await.unwrap();
+        assert_eq!(decrypted, content.as_bytes());
+
+        fs::remove_file(&temp_file).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_lock_file_content_structure() {
+        let locker = AesLocker::new();
+        let password = "structure_test";
+        
+        let temp_file = std::env::temp_dir().join(format!(
+            "aes_test_structure_{}.txt",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        
+        let content = b"Test content for structure verification";
+        fs::write(&temp_file, content).await.unwrap();
+
+        // 加密文件
+        locker.lock_inner(temp_file.clone(), password.to_string())
+            .await
+            .expect("Failed to lock file");
+
+        // 验证加密文件的结构
+        let encrypted = fs::read(&temp_file).await.unwrap();
+        
+        // 加密内容应该至少包含 salt (16) + iv (16) + 加密数据
+        let min_size = SALT_LENGTH + IV_LENGTH;
+        assert!(
+            encrypted.len() >= min_size,
+            "Encrypted file size {} is less than minimum {}",
+            encrypted.len(),
+            min_size
+        );
+
+        locker.unlock_inner(temp_file.clone(), password.to_string())
+            .await
+            .expect("Failed to unlock file");
+
+        fs::remove_file(&temp_file).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_lock_file_with_special_characters() {
+        let locker = AesLocker::new();
+        let password = "special!@#$%^&*()";
+        
+        let temp_file = std::env::temp_dir().join(format!(
+            "aes_test_special_{}.txt",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        
+        let content = "Content with special chars: !@#$%^&*()[]{}|;:<>?,./";
+        fs::write(&temp_file, content).await.unwrap();
+
+        locker.lock_inner(temp_file.clone(), password.to_string())
+            .await
+            .expect("Failed to lock file");
+
+        locker.unlock_inner(temp_file.clone(), password.to_string())
+            .await
+            .expect("Failed to unlock file");
+
+        let decrypted = fs::read(&temp_file).await.unwrap();
+        assert_eq!(decrypted, content.as_bytes());
+
+        fs::remove_file(&temp_file).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_lock_file_preserves_all_bytes() {
+        let locker = AesLocker::new();
+        let password = "all_bytes_pwd";
+        
+        let temp_file = std::env::temp_dir().join(format!(
+            "aes_test_allbytes_{}.bin",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        
+        // 创建包含所有可能字节值的文件
+        let all_bytes: Vec<u8> = (0..=255).collect();
+        fs::write(&temp_file, &all_bytes).await.unwrap();
+
+        locker.lock_inner(temp_file.clone(), password.to_string())
+            .await
+            .expect("Failed to lock file");
+
+        locker.unlock_inner(temp_file.clone(), password.to_string())
+            .await
+            .expect("Failed to unlock file");
+
+        let decrypted = fs::read(&temp_file).await.unwrap();
+        assert_eq!(decrypted, all_bytes);
+
+        fs::remove_file(&temp_file).await.unwrap();
     }
 }

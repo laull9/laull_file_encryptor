@@ -10,8 +10,13 @@ use async_trait::async_trait;
 
 type HmacSha256 = Hmac<Sha256>;
 const MAX_CONCURRENT: usize = 64;
-// const TRAILER_FINISH_TAG: [u8; 8] = *b";;!FQ!;;";
-const TRAILER_LEN: usize = 4 + 32; // locker_id + tag
+
+const TRAITER_ID_LEN: usize = 4;
+const TRAITER_TAG_LEN: usize = 32;
+const TRAILER_FINISH_TAG: [u8; 8] = *b";;!FQ!;;";
+const TRAILER_FINISH_TAG_LEN: usize = 8;
+const TRAILER_LEN: usize = TRAITER_ID_LEN + TRAITER_TAG_LEN + TRAILER_FINISH_TAG_LEN;
+
 const HEADER_LEN: usize = 1024;    // read first 1KB to compute tag
 
 pub async fn scan_files_iterative<F>(root: &Path, mut callback: F) -> tokio::io::Result<()> 
@@ -55,7 +60,7 @@ where
 #[async_trait]
 pub trait Locker: Send + Sync + 'static {
     // 每个 locker 返回自己的 ID（改为方法以支持 trait 对象）
-    fn locker_id(&self) -> [u8; 4];
+    fn locker_id(&self) -> [u8; TRAITER_ID_LEN];
     async fn lock_inner(&self, filepath: PathBuf, password: String) -> tokio::io::Result<()>;
     async fn unlock_inner(&self, filepath: PathBuf, password: String) -> tokio::io::Result<()>;
     async fn is_locked(&self, filepath: PathBuf) 
@@ -96,7 +101,7 @@ pub async fn compute_tag_with_len(
     file: &mut File,
     password: &str,
     content_len: u64,
-) -> tokio::io::Result<[u8; 32]>
+) -> tokio::io::Result<[u8; TRAITER_TAG_LEN]>
 {
     let read_len = HEADER_LEN.min(content_len as usize);
     let mut header = vec![0u8; read_len];
@@ -129,35 +134,44 @@ pub async fn compute_tag_with_len(
 
 // 写尾标：locker_id + tag
 pub async fn write_trailer<P: AsRef<Path>>(
-    path: P, locker_id: [u8;4], password: &str
+    path: P, locker_id: [u8;TRAITER_ID_LEN], password: &str
 ) -> tokio::io::Result<()> {
 
+    // 以可读写方式打开
     let mut file = File::options().read(true).write(true).open(&path).await?;
     let meta = file.metadata().await?;
     let file_len = meta.len();
 
-    // 删除旧 trailer
+    // 仅当文件确实已经包含尾标时才截断旧尾标
+    // （复用你已有的 read_trailer_if_exists）
     let content_len = if file_len >= TRAILER_LEN as u64 {
-        file.set_len(file_len - TRAILER_LEN as u64).await?;
-        file_len - TRAILER_LEN as u64
+        if let Ok(Some(_)) = read_trailer_if_exists(&path).await {
+            // 文件尾确实有旧 trailer，移除它
+            file.set_len(file_len - TRAILER_LEN as u64).await?;
+            file_len - TRAILER_LEN as u64
+        } else {
+            // 无旧 trailer，保持原文件长度
+            file_len
+        }
     } else {
         file_len
     };
 
-    // 重算 tag
+    // 重新计算 tag（在截断旧尾标后的内容上算）
     let mut file2 = File::options().read(true).open(&path).await?;
     let tag = compute_tag_with_len(&mut file2, password, content_len).await?;
 
-    // 追加 tail
+    // 追加 tail（locker_id + tag + finish_tag）
     file.seek(std::io::SeekFrom::End(0)).await?;
     file.write_all(&locker_id).await?;
     file.write_all(&tag).await?;
+    file.write_all(&TRAILER_FINISH_TAG).await?;
     Ok(())
 }
 
 pub async fn read_trailer_if_exists<P: AsRef<Path>>(
     path: P
-) -> tokio::io::Result<Option<([u8; 4], [u8; 32])>> {
+) -> tokio::io::Result<Option<([u8; TRAITER_ID_LEN], [u8; TRAITER_TAG_LEN])>> {
 
     let mut file = File::options().read(true).open(&path).await?;
     let metadata = file.metadata().await?;
@@ -171,8 +185,12 @@ pub async fn read_trailer_if_exists<P: AsRef<Path>>(
     file.seek(std::io::SeekFrom::End(-(TRAILER_LEN as i64))).await?;
     file.read_exact(&mut buf).await?;
 
-    let locker_id: [u8; 4] = buf[..4].try_into().unwrap();
-    let tag: [u8; 32] = buf[4..].try_into().unwrap();
+    let locker_id: [u8; TRAITER_ID_LEN] = buf[..TRAITER_ID_LEN].try_into().unwrap();
+    let tag: [u8; 32] = buf[TRAITER_ID_LEN..(TRAITER_ID_LEN + TRAITER_TAG_LEN)].try_into().unwrap();
+    let finish_tag: [u8; 8] = buf[(TRAITER_ID_LEN + TRAITER_TAG_LEN)..].try_into().unwrap();
+    if finish_tag != TRAILER_FINISH_TAG {
+        return Ok(None);
+    }
 
     Ok(Some((locker_id, tag)))
 }
