@@ -9,7 +9,7 @@ use tokio::sync::Semaphore;
 use async_trait::async_trait;
 
 type HmacSha256 = Hmac<Sha256>;
-const MAX_CONCURRENT: usize = 64;
+const MAX_CONCURRENT: usize = 16;
 
 const TRAITER_ID_LEN: usize = 4;
 const TRAITER_TAG_LEN: usize = 32;
