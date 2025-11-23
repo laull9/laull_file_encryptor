@@ -267,6 +267,9 @@ pub struct DirLockManager {
     password: String,
     locker: Arc<dyn Locker>,
     joinset: Arc<Mutex<JoinSet<()>>>,
+    progress_total: Arc<Mutex<u64>>,
+    progress_now: Arc<Mutex<u64>>,
+    progress_err: Arc<Mutex<u64>>,
 }
 
 impl DirLockManager {
@@ -281,6 +284,9 @@ impl DirLockManager {
             password,
             locker: Arc::new(locker),
             joinset: Arc::new(Mutex::new(JoinSet::new())),
+            progress_total: Arc::new(Mutex::new(0)),
+            progress_now: Arc::new(Mutex::new(0)),
+            progress_err: Arc::new(Mutex::new(0)),
         }
     }
 

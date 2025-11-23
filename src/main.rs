@@ -5,8 +5,6 @@ use std::path::{PathBuf};
 
 use std::time::{Duration, Instant};
 
-use futures::FutureExt;
-
 /// 一个基于 RAII 的计时器。
 #[derive(Debug)]
 struct Timer {
@@ -62,9 +60,9 @@ async fn main() {
                     file_locker::DirLockManager::new(
                         target,
                         "password".to_string(),
-                        file_locker::SimpleLocker::new(),
+                        file_locker::ChaChaLocker::new(),
                     ).lock().await;
-                }
+                }     
                 _time.print();
             },
             Some(("unlock", target)) => 
@@ -75,7 +73,7 @@ async fn main() {
                     file_locker::DirLockManager::new(
                         target,
                         "password".to_string(),
-                        file_locker::SimpleLocker::new(),
+                        file_locker::ChaChaLocker::new(),
                     ).unlock().await;
                 }
                 _time.print();
