@@ -55,11 +55,13 @@ async fn main() {
             Some(("lock", target)) => 
             {
                 let _time = Timer::new("加密");
-                file_locker::DirLockManager::new(
+                let l = file_locker::DirLockManager::new(
                     vec![target.to_string()],
                     "password".to_string(),
                     file_locker::AesLocker::new(),
-                ).lock().await;   
+                );
+                l.lock().await;
+                println!("{}/{}  err:{}", l.get_done_count(), l.get_total_count(), l.get_err_count());
                 _time.print();
             },
             Some(("unlock", target)) => 

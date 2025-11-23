@@ -325,9 +325,7 @@ impl DirLockManager {
             let progress_done = self.progress_done.clone();
             let progress_err = self.progress_err.clone();
 
-            let _ = async{
-                *progress_total.lock().unwrap() += 1;
-            };
+            *progress_total.lock().unwrap() += 1;
 
             // 把任务加入 JoinSet
             let mut set = j.lock().unwrap();
@@ -360,10 +358,8 @@ impl DirLockManager {
             let progress_done = self.progress_done.clone();
             let progress_err = self.progress_err.clone();
 
-            let _ = async{
-                *progress_total.lock().unwrap() += 1;
-            };
-
+            *progress_total.lock().unwrap() += 1;
+            
             let mut set = j.lock().unwrap();
             set.spawn(async move {
                 let _permit = sem.acquire().await.expect("semaphore closed");
@@ -383,15 +379,15 @@ impl DirLockManager {
         self.wait_all().await;
     }
 
-    fn get_total_count(&self) -> u64 {
+    pub fn get_total_count(&self) -> u64 {
         *self.progress_total.lock().unwrap()
     }
 
-    fn get_done_count(&self) -> u64 {
+    pub fn get_done_count(&self) -> u64 {
          *self.progress_done.lock().unwrap()
     }
 
-    fn get_err_count(&self) -> u64 {
+    pub fn get_err_count(&self) -> u64 {
          *self.progress_err.lock().unwrap()
     }
 

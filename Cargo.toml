@@ -25,6 +25,8 @@ getrandom = "0.2"
 ctr = "0.9.2"
 ring = "0.17.14"
 tempfile = "3.23.0"
+egui = "0.33.2"
+eframe = "0.33.2"
 
 [profile.release]
 # opt-level = "z"        # 优先优化体积（比"3"更小，牺牲部分速度）
