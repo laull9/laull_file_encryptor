@@ -20,13 +20,28 @@ const TRAILER_LEN: usize = TRAITER_ID_LEN + TRAITER_TAG_LEN + TRAILER_FINISH_TAG
 
 const HEADER_LEN: usize = 1024;    // read first 1KB to compute tag
 
-pub async fn scan_files_iterative<F>(root: &Path, mut callback: F) -> tokio::io::Result<()> 
+pub async fn scan_files_iterative<F>(paths: &Vec<String>, mut callback: F) -> tokio::io::Result<()>
 where 
     F: FnMut(PathBuf),
 {
     let mut directories = VecDeque::new();
-    directories.push_back(root.to_path_buf());
     
+    // 遍历每个传入的路径
+    for path_str in paths {
+        let path = Path::new(&path_str).to_path_buf();
+        
+        // 如果路径是文件夹，添加到目录队列中
+        if path.is_dir() {
+            directories.push_back(path);
+        } else if path.is_file() {
+            // 如果路径是文件，直接调用回调函数
+            callback(path);
+        } else {
+            eprintln!("路径 {} 不存在或无法访问", path.display());
+        }
+    }
+
+    // 处理所有目录
     while let Some(current_dir) = directories.pop_front() {
         let mut entries = match fs::read_dir(&current_dir).await {
             Ok(entries) => entries,
@@ -54,7 +69,7 @@ where
             }
         }
     }
-    
+
     Ok(())
 }
 
@@ -263,29 +278,28 @@ pub async fn remove_trailer<P: AsRef<Path>>(path: P) -> tokio::io::Result<()> {
 
 pub struct DirLockManager {
     semaphore: Arc<Semaphore>,
-    dir_path: PathBuf,
+    paths: Vec<String>,
     password: String,
     locker: Arc<dyn Locker>,
     joinset: Arc<Mutex<JoinSet<()>>>,
     progress_total: Arc<Mutex<u64>>,
-    progress_now: Arc<Mutex<u64>>,
+    progress_done: Arc<Mutex<u64>>,
     progress_err: Arc<Mutex<u64>>,
 }
 
 impl DirLockManager {
-    pub fn new<P, L>(dir_path: P, password: String, locker: L) -> Self
+    pub fn new<L>(dir_path: Vec<String>, password: String, locker: L) -> Self
     where
-        P: AsRef<Path>,
         L: Locker + 'static
     {
         Self {
             semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT)),
-            dir_path: dir_path.as_ref().to_path_buf(),
+            paths: dir_path,
             password,
             locker: Arc::new(locker),
             joinset: Arc::new(Mutex::new(JoinSet::new())),
             progress_total: Arc::new(Mutex::new(0)),
-            progress_now: Arc::new(Mutex::new(0)),
+            progress_done: Arc::new(Mutex::new(0)),
             progress_err: Arc::new(Mutex::new(0)),
         }
     }
@@ -303,10 +317,17 @@ impl DirLockManager {
     pub async fn lock(&self) {
         let j = self.joinset.clone();
 
-        if let Err(e) = scan_files_iterative(&self.dir_path, move |file_path| {
+        if let Err(e) = scan_files_iterative(&self.paths, move |file_path| {
             let sem = self.semaphore.clone();
             let pwd2 = self.password.clone();
             let locker2 = self.locker.clone();
+            let progress_total = self.progress_total.clone();
+            let progress_done = self.progress_done.clone();
+            let progress_err = self.progress_err.clone();
+
+            let _ = async{
+                *progress_total.lock().unwrap() += 1;
+            };
 
             // 把任务加入 JoinSet
             let mut set = j.lock().unwrap();
@@ -314,7 +335,10 @@ impl DirLockManager {
                 let _permit = sem.acquire().await.expect("semaphore closed");
 
                 if let Err(e) = locker2.lock(file_path, pwd2).await {
+                    *progress_err.lock().unwrap() += 1;
                     eprintln!("加密文件时出错: {}", e);
+                }else{
+                    *progress_done.lock().unwrap() += 1;
                 }
             });
         }).await {
@@ -328,17 +352,27 @@ impl DirLockManager {
     pub async fn unlock(&self) {
         let j = self.joinset.clone();
 
-        if let Err(e) = scan_files_iterative(&self.dir_path, move |file_path| {
+        if let Err(e) = scan_files_iterative(&self.paths, move |file_path| {
             let sem = self.semaphore.clone();
             let pwd2 = self.password.clone();
             let locker2 = self.locker.clone();
+            let progress_total = self.progress_total.clone();
+            let progress_done = self.progress_done.clone();
+            let progress_err = self.progress_err.clone();
+
+            let _ = async{
+                *progress_total.lock().unwrap() += 1;
+            };
 
             let mut set = j.lock().unwrap();
             set.spawn(async move {
                 let _permit = sem.acquire().await.expect("semaphore closed");
 
                 if let Err(e) = locker2.unlock(file_path, pwd2).await {
+                    *progress_err.lock().unwrap() += 1;
                     eprintln!("解密文件时出错: {}", e);
+                }else{
+                    *progress_done.lock().unwrap() += 1;
                 }
             });
         }).await {
@@ -348,6 +382,19 @@ impl DirLockManager {
         // 等待全部完成
         self.wait_all().await;
     }
+
+    fn get_total_count(&self) -> u64 {
+        *self.progress_total.lock().unwrap()
+    }
+
+    fn get_done_count(&self) -> u64 {
+         *self.progress_done.lock().unwrap()
+    }
+
+    fn get_err_count(&self) -> u64 {
+         *self.progress_err.lock().unwrap()
+    }
+
 }
 
 

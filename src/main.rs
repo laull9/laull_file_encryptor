@@ -55,27 +55,22 @@ async fn main() {
             Some(("lock", target)) => 
             {
                 let _time = Timer::new("加密");
-                let target = PathBuf::from(target);
-                if target.exists() {
-                    file_locker::DirLockManager::new(
-                        target,
-                        "password".to_string(),
-                        file_locker::AesLocker::new(),
-                    ).lock().await;
-                }     
+                file_locker::DirLockManager::new(
+                    vec![target.to_string()],
+                    "password".to_string(),
+                    file_locker::AesLocker::new(),
+                ).lock().await;   
                 _time.print();
             },
             Some(("unlock", target)) => 
             {    
                 let _time = Timer::new("解密");
-                let target = PathBuf::from(target);
-                if target.exists() {
-                    file_locker::DirLockManager::new(
-                        target,
-                        "password".to_string(),
-                        file_locker::AesLocker::new(),
-                    ).unlock().await;
-                }
+                file_locker::DirLockManager::new(
+                    vec![target.to_string()],
+                    "password".to_string(),
+                    file_locker::AesLocker::new(),
+                ).unlock().await;
+                
                 _time.print();
                 
             },
