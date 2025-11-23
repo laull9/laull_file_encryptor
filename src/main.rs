@@ -60,7 +60,7 @@ async fn main() {
                     file_locker::DirLockManager::new(
                         target,
                         "password".to_string(),
-                        file_locker::ChaChaLocker::new(),
+                        file_locker::AesLocker::new(),
                     ).lock().await;
                 }     
                 _time.print();
@@ -73,7 +73,7 @@ async fn main() {
                     file_locker::DirLockManager::new(
                         target,
                         "password".to_string(),
-                        file_locker::ChaChaLocker::new(),
+                        file_locker::AesLocker::new(),
                     ).unlock().await;
                 }
                 _time.print();

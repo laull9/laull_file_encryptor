@@ -6,4 +6,3 @@ pub mod aes_locker;
 pub use aes_locker::AesLocker;
 pub mod chacha20_locker;
 pub use chacha20_locker::ChaChaLocker;
-pub mod aes_locker2;
