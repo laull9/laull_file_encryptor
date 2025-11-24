@@ -5,6 +5,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use eframe::egui;
 use rfd::AsyncFileDialog;
+use tracing::{info, warn, debug, error};
+use tracing_subscriber::{fmt, EnvFilter};
+
 
 /// 一个基于 RAII 的计时器
 #[derive(Debug, Clone)]
@@ -103,86 +106,82 @@ impl FileLockerApp {
     fn select_folder(&mut self) {
         let folder = AsyncFileDialog::new().pick_folder();
         
+        let s_files = self.selected_files.clone();
         tokio::spawn(async move {
             if let Some(handle) = folder.await {
                 let path = handle.path().to_string_lossy();
-                // 这里需要通过消息传递将结果发送回主线程
+                let mut s_files_lock = s_files.lock().unwrap();
+                *s_files_lock = vec![path.clone().into_owned()];
+
                 println!("Selected folder: {:?}", path);
             }
         });
     }
 
-    async fn lock_files(&mut self) {
+    fn lock_files(&mut self) {
         if self.selected_files.lock().unwrap().is_empty() {
             self.result_message = "请先选择文件或文件夹".to_string();
             return;
         }
 
+        // 1. 初始化 DirLockManager, 存入 UI 状态
+        let paths = self.selected_files.lock().unwrap().clone();
+        let password = self.password.clone();
+
+        let manager = Arc::new(file_locker::DirLockManager::new(
+            paths,
+            password,
+            file_locker::AesLocker::new(),
+        ));
+
+        self.locker_manager = Some(manager.clone());
         self.is_working = true;
         self.operation = Operation::Locking;
         self.progress = 0.0;
-        self.result_message.clear();
         self.timer = Some(Timer::new("加密"));
 
-        let paths: Vec<String> = self.selected_files.lock().unwrap().clone();
-
-        let password = self.password.clone();
-
-        self.locker_manager = Some(Arc::new(file_locker::DirLockManager::new(
-                paths,
-                password,
-                file_locker::AesLocker::new(),
-            )));
-        let locker = self.locker_manager.clone().unwrap();
-        // 在实际应用中，这里应该使用消息传递来更新进度
+        // 2. 后台执行 lock()（只传 Arc，不传 app）
         tokio::spawn(async move {
-
-            locker.lock().await;
-            
-            // 这里应该发送消息回主线程更新状态
-            println!("加密完成");
+            manager.lock().await;
+            info!("加密完成");
         });
     }
 
-    async fn unlock_files(&mut self) {
+    fn unlock_files(&mut self) {
         if self.selected_files.lock().unwrap().is_empty() {
             self.result_message = "请先选择文件或文件夹".to_string();
             return;
         }
 
+        let paths = self.selected_files.lock().unwrap().clone();
+        let password = self.password.clone();
+
+        let manager = Arc::new(file_locker::DirLockManager::new(
+            paths,
+            password,
+            file_locker::AesLocker::new(),
+        ));
+
+        self.locker_manager = Some(manager.clone());
         self.is_working = true;
         self.operation = Operation::Unlocking;
         self.progress = 0.0;
-        self.result_message.clear();
         self.timer = Some(Timer::new("解密"));
-
-        let paths: Vec<String> = self.selected_files.lock().unwrap().clone();
-        let password = self.password.clone();
-
-
-        self.locker_manager = Some(Arc::new(file_locker::DirLockManager::new(
-                paths,
-                password,
-                file_locker::AesLocker::new(),
-            )));
-        let locker = self.locker_manager.clone().unwrap();
-
         tokio::spawn(async move {
-
-            locker.unlock().await;
-
-            // 这里应该发送消息回主线程更新状态
-            println!("解密完成");
+            manager.unlock().await;
+            info!("解密完成");
         });
     }
 
     fn update_progress(&mut self) {
-        // 模拟进度更新 - 在实际应用中应该从异步任务接收真实进度
-        if self.is_working && self.locker_manager.is_some() {
-            self.progress = self.locker_manager.as_ref().unwrap().get_done_count() as f32 
-                / self.locker_manager.as_ref().unwrap().get_total_count() as f32 ;
+        // 进度更新
+        if self.locker_manager.is_some() {
+            let total_count = self.locker_manager.as_ref().unwrap().get_total_count();
+            let done_count = self.locker_manager.as_ref().unwrap().get_done_count();
+            let err_count = self.locker_manager.as_ref().unwrap().get_err_count();
+            self.progress = done_count as f32 / total_count as f32 ;
             
-            if self.progress >= 1.0 {
+            if total_count <= done_count + err_count {
                 self.operation_complete();
             }
         }
@@ -190,6 +189,7 @@ impl FileLockerApp {
 
     fn operation_complete(&mut self) {
         self.is_working = false;
+        self.progress = 0.0;
         if let Some(timer) = &self.timer {
             self.result_message = format!(
                 "操作完成！\n耗时: {}",
@@ -197,6 +197,8 @@ impl FileLockerApp {
             );
         }
         self.operation = Operation::None;
+        // 停止计时器
+        self.timer = None;
     }
 }
 
@@ -255,17 +257,11 @@ impl eframe::App for FileLockerApp {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     if ui.add_enabled(!self.is_working, egui::Button::new("🔒 加密")).clicked() {
-                        let mut app = self.clone();
-                        tokio::spawn(async move {
-                            app.lock_files().await;
-                        });
+                        self.lock_files();
                     }
                     
                     if ui.add_enabled(!self.is_working, egui::Button::new("🔓 解密")).clicked() {
-                        let mut app = self.clone();
-                        tokio::spawn(async move {
-                            app.unlock_files().await;
-                        });
+                        self.unlock_files();
                     }
                 });
 
@@ -304,9 +300,9 @@ impl eframe::App for FileLockerApp {
                 ui.horizontal(|ui| {
                     ui.label("状态:");
                     if self.is_working {
-                        ui.label("🟢 工作中");
+                        ui.label("工作中");
                     } else {
-                        ui.label("🟡 就绪");
+                        ui.label("就绪");
                     }
                 });
             });
@@ -319,6 +315,11 @@ impl eframe::App for FileLockerApp {
 
 #[tokio::main]
 async fn main() -> Result<(), eframe::Error> {
+
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::new("debug"))
+        .with_timer(fmt::time::UtcTime::rfc_3339()) // 使用 UTC 时间和 RFC3339 格式
+        .init();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

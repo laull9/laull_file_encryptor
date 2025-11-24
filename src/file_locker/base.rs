@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use sha2::{Sha256, Digest};
@@ -291,9 +292,9 @@ pub struct DirLockManager {
     password: Arc<String>,
     locker: Arc<dyn Locker + 'static>,
     joinset: Arc<AsyncMutex<JoinSet<()>>>,
-    progress_total: Arc<AsyncMutex<u64>>,
-    progress_done: Arc<AsyncMutex<u64>>,
-    progress_err: Arc<AsyncMutex<u64>>,
+    progress_total: Arc<AtomicU64>,
+    progress_done: Arc<AtomicU64>,
+    progress_err: Arc<AtomicU64>,
 }
 
 impl DirLockManager {
@@ -307,9 +308,9 @@ impl DirLockManager {
             password: Arc::new(password),
             locker: Arc::new(locker),
             joinset: Arc::new(AsyncMutex::new(JoinSet::new())),
-            progress_total: Arc::new(AsyncMutex::new(0)),
-            progress_done: Arc::new(AsyncMutex::new(0)),
-            progress_err: Arc::new(AsyncMutex::new(0)),
+            progress_total: Arc::new(AtomicU64::new(0)),
+            progress_done: Arc::new(AtomicU64::new(0)),
+            progress_err: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -322,73 +323,45 @@ impl DirLockManager {
             }
         }
     }
-    /*
-    
-    
-    , async move |file_path| {
-            let sem = self.semaphore.clone();
-            let pwd2 = self.password.clone();
-            let locker2 = self.locker.clone();
-            let progress_total = self.progress_total.clone();
-            let progress_done = self.progress_done.clone();
-            let progress_err = self.progress_err.clone();
-
-
-
-            // 把任务加入 JoinSet
-            let mut set = j.lock().await;
-            // set.spawn(async move {
-            *progress_total.lock().await += 1;
-
-            let _permit = sem.acquire().await.expect("semaphore closed");
-
-            if let Err(e) = locker2.lock(file_path, pwd2.as_ref().clone()).await {
-                *progress_err.lock().await += 1;
-                eprintln!("加密文件时出错: {}", e);
-            }else{
-                *progress_done.lock().await += 1;
-            }
-            // });
-            }
-        )
-     */
 
     pub async fn lock(&self) {
         let j = self.joinset.clone();
 
         let fd = scan_files_iterative(&self.paths).await;
-        if fd.is_err(){
-            eprintln!("扫描目录时出错: {:?}", fd.err());
+        if let Err(e) = &fd {
+            eprintln!("扫描目录时出错: {:?}", e);
+            return;
         }
-        else{
-            for file_path in fd.unwrap(){
-                let sem = self.semaphore.clone();
-                let pwd2 = self.password.clone();
-                let locker2 = self.locker.clone();
-                let progress_total = self.progress_total.clone();
-                let progress_done = self.progress_done.clone();
-                let progress_err = self.progress_err.clone();
+        let files = fd.unwrap();
 
-                // 把任务加入 JoinSet
-                let mut set = j.lock().await;
+        // 先设置总数（避免 race / 除零 / UI 无基数）
+        self.progress_total.store(files.len() as u64, Ordering::SeqCst);
+        // 重置 done / err（若需要）
+        self.progress_done.store(0, Ordering::SeqCst);
+        self.progress_err.store(0, Ordering::SeqCst);
 
-                set.spawn(async move {
+        for file_path in files {
+            let sem = self.semaphore.clone();
+            let pwd2 = self.password.clone();
+            let locker2 = self.locker.clone();
+            let progress_done = self.progress_done.clone();
+            let progress_err = self.progress_err.clone();
 
-                    *progress_total.lock().await += 1;
+            // 获取 joinset guard 短生命周期地 spawn
+            let mut set = j.lock().await;
+            set.spawn(async move {
+                // 先获取 permit（或先 inc total，已经预先设置了 total）
+                let _permit = sem.acquire().await.expect("semaphore closed");
 
-                    let _permit = sem.acquire().await.expect("semaphore closed");
-
-                    if let Err(e) = locker2.lock(file_path, pwd2.as_ref().clone()).await {
-                        *progress_err.lock().await += 1;
-                        eprintln!("加密文件时出错: {}", e);
-                    }else{
-                        *progress_done.lock().await += 1;
-                    }
-
-                });
-                
-            }
+                if let Err(e) = locker2.lock(file_path, pwd2.as_ref().clone()).await {
+                    progress_err.fetch_add(1, Ordering::SeqCst);
+                    eprintln!("加密文件时出错: {}", e);
+                } else {
+                    progress_done.fetch_add(1, Ordering::SeqCst);
+                }
+            });
         }
+
         // 等待全部完成
         self.wait_all().await;
     }
@@ -397,52 +370,54 @@ impl DirLockManager {
         let j = self.joinset.clone();
 
         let fd = scan_files_iterative(&self.paths).await;
-        if fd.is_err(){
-            eprintln!("扫描目录时出错: {:?}", fd.err());
+        if let Err(e) = &fd {
+            eprintln!("扫描目录时出错: {:?}", e);
+            return;
         }
-        else{
-            for file_path in fd.unwrap(){
-                let sem = self.semaphore.clone();
-                let pwd2 = self.password.clone();
-                let locker2 = self.locker.clone();
-                let progress_total = self.progress_total.clone();
-                let progress_done = self.progress_done.clone();
-                let progress_err = self.progress_err.clone();
+        let files = fd.unwrap();
 
-                // 把任务加入 JoinSet
-                let mut set = j.lock().await;
+        // 先设置总数（避免 race / 除零 / UI 无基数）
+        self.progress_total.store(files.len() as u64, Ordering::SeqCst);
+        // 重置 done / err（若需要）
+        self.progress_done.store(0, Ordering::SeqCst);
+        self.progress_err.store(0, Ordering::SeqCst);
 
-                set.spawn(async move {
+        for file_path in files {
+            let sem = self.semaphore.clone();
+            let pwd2 = self.password.clone();
+            let locker2 = self.locker.clone();
+            let progress_done = self.progress_done.clone();
+            let progress_err = self.progress_err.clone();
 
-                    *progress_total.lock().await += 1;
+            // 获取 joinset guard 短生命周期地 spawn
+            let mut set = j.lock().await;
+            set.spawn(async move {
+                // 先获取 permit（或先 inc total，已经预先设置了 total）
+                let _permit = sem.acquire().await.expect("semaphore closed");
 
-                    let _permit = sem.acquire().await.expect("semaphore closed");
-
-                    if let Err(e) = locker2.unlock(file_path, pwd2.as_ref().clone()).await {
-                        *progress_err.lock().await += 1;
-                        eprintln!("解密文件时出错: {}", e);
-                    }else{
-                        *progress_done.lock().await += 1;
-                    }
-
-                });
-                
-            }
+                if let Err(e) = locker2.unlock(file_path, pwd2.as_ref().clone()).await {
+                    progress_err.fetch_add(1, Ordering::SeqCst);
+                    eprintln!("解密文件时出错: {}", e);
+                } else {
+                    progress_done.fetch_add(1, Ordering::SeqCst);
+                }
+            });
         }
+
         // 等待全部完成
         self.wait_all().await;
     }
 
     pub fn get_total_count(&self) -> u64 {
-        *self.progress_total.blocking_lock()
+    self.progress_total.load(Ordering::SeqCst)
     }
 
     pub fn get_done_count(&self) -> u64 {
-         *self.progress_done.blocking_lock()
+        self.progress_done.load(Ordering::SeqCst)
     }
 
     pub fn get_err_count(&self) -> u64 {
-         *self.progress_err.blocking_lock()
+        self.progress_err.load(Ordering::SeqCst)
     }
 
 }
