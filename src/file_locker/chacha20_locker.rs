@@ -208,7 +208,7 @@ mod tests {
         let locker = ChaChaLocker::new();
 
         // 加密
-        locker.lock(file_path.clone(), PASSWORD.to_string())
+        locker.lock(&file_path, PASSWORD.to_string())
             .await.unwrap();
 
         // 加密后文件肯定不一样
@@ -216,7 +216,7 @@ mod tests {
         assert_ne!(encrypted, content);
 
         // 解密
-        locker.unlock(file_path.clone(), PASSWORD.to_string())
+        locker.unlock(&file_path, PASSWORD.to_string())
             .await.unwrap();
 
         // 内容应恢复
@@ -236,14 +236,14 @@ mod tests {
         let locker = ChaChaLocker::new();
 
         // 加密
-        locker.lock(file_path.clone(), PASSWORD.to_string())
+        locker.lock(&file_path, PASSWORD.to_string())
             .await.unwrap();
 
         let encrypted = read_all(&file_path).await;
         assert!(encrypted.len() > original.len());  // 加上 nonce 和 AEAD tag
 
         // 解密
-        locker.unlock(file_path.clone(), PASSWORD.to_string())
+        locker.unlock(&file_path, PASSWORD.to_string())
             .await.unwrap();
 
         let decrypted = read_all(&file_path).await;
@@ -264,11 +264,11 @@ mod tests {
         let locker = ChaChaLocker::new();
 
         // 加密
-        locker.lock(file_path.clone(), PASSWORD.to_string())
+        locker.lock(&file_path, PASSWORD.to_string())
             .await.unwrap();
 
         // 使用错误密码解密 —— 应失败
-        let result = locker.unlock(file_path.clone(), "wrong".to_string()).await;
+        let result = locker.unlock(&file_path, "wrong".to_string()).await;
         assert!(result.is_err(), "应该因密码错误解密失败");
     }
 
@@ -286,7 +286,7 @@ mod tests {
         let locker = ChaChaLocker::new();
 
         // 加密（内含写 trailer）
-        locker.lock(file_path.clone(), PASSWORD.to_string())
+        locker.lock(&file_path, PASSWORD.to_string())
             .await.unwrap();
 
         // 读取 trailer

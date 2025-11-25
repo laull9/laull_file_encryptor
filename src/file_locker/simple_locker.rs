@@ -90,18 +90,18 @@ mod tests {
         let pwd = "s3cr3t".to_string();
 
         // lock
-        locker.lock(path.clone(), pwd.clone()).await.unwrap();
+        locker.lock(&path, pwd.clone()).await.unwrap();
 
         // should be locked
         let locked = locker.is_locked(path.clone()).await.unwrap();
         assert!(locked, "file should report locked after lock()");
 
         // unlocking with wrong password should error
-        let wrong = locker.unlock(path.clone(), "bad".to_string()).await;
+        let wrong = locker.unlock(&path, "bad".to_string()).await;
         assert!(wrong.is_err(), "unlock with wrong password should fail");
 
         // unlock with correct password 这里报错
-        locker.unlock(path.clone(), pwd.clone()).await.unwrap();
+        locker.unlock(&path, pwd.clone()).await.unwrap();
 
         // file content restored
         let data = fs::read(&path).await.unwrap();

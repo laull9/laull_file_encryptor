@@ -1,5 +1,6 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::process;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::fs::{self, File};
@@ -9,6 +10,9 @@ use hmac::{Hmac, Mac};
 use tokio::task::JoinSet;
 use tokio::sync::{Semaphore, Mutex as AsyncMutex};
 use async_trait::async_trait;
+use tracing::{error};
+
+use super::namelocker::{lock_pathname_on_fs, unlock_pathname_on_fs};
 
 type HmacSha256 = Hmac<Sha256>;
 const MAX_CONCURRENT: usize = 16;
@@ -21,65 +25,79 @@ const TRAILER_LEN: usize = TRAITER_ID_LEN + TRAITER_TAG_LEN + TRAILER_FINISH_TAG
 
 const HEADER_LEN: usize = 1024;    // read first 1KB to compute tag
 
-pub async fn scan_files_iterative(paths: &Vec<String>) -> tokio::io::Result<Vec<PathBuf>> {
-    let mut directories = VecDeque::new();
-
+pub async fn scan_files_iterative(paths: &Vec<String>) -> tokio::io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+    let mut directories_to_process = VecDeque::new();
     let mut found_files = Vec::new();
-    
-    // 遍历每个传入的路径
+    let mut found_dirs = Vec::new();
+
+    let mut input_dirs = Vec::new(); // 仅用于最后过滤
+
+    // 遍历传入的路径
     for path_str in paths {
-        let path = Path::new(&path_str).to_path_buf();
-        
-        // 使用 metadata 来同时判断文件类型和存在性
+        let path = Path::new(path_str).to_path_buf();
+
         let metadata = match fs::metadata(&path).await {
             Ok(meta) => meta,
             Err(e) => {
-                eprintln!("路径 '{}' 不存在或无法访问: {}", path.display(), e);
+                error!("路径 '{}' 不存在或无法访问: {}", path.display(), e);
                 continue;
             }
         };
 
         if metadata.is_dir() {
-            directories.push_back(path);
+            directories_to_process.push_back(path.clone());
+            found_dirs.push(path.clone());
+            input_dirs.push(path);  // 记录输入目录
         } else if metadata.is_file() {
             found_files.push(path);
         }
-        // 忽略既不是文件也不是目录的特殊文件
     }
 
-    // 处理所有目录
-    while let Some(current_dir) = directories.pop_front() {
+    // 遍历所有目录
+    while let Some(current_dir) = directories_to_process.pop_front() {
         let mut entries = match fs::read_dir(&current_dir).await {
             Ok(entries) => entries,
             Err(e) => {
-                eprintln!("无法读取目录 '{}': {}", current_dir.display(), e);
+                error!("无法读取目录 '{}': {}", current_dir.display(), e);
                 continue;
             }
         };
-        
+
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
-            
             let metadata = match fs::metadata(&path).await {
                 Ok(meta) => meta,
                 Err(e) => {
-                    eprintln!("无法获取文件元数据 '{}': {}", path.display(), e);
+                    error!("无法获取文件元数据 '{}': {}", path.display(), e);
                     continue;
                 }
             };
-            
+
             if metadata.is_file() {
-                // 4. 同样，将文件路径添加到 Vec 中
                 found_files.push(path);
             } else if metadata.is_dir() {
-                directories.push_back(path);
+                directories_to_process.push_back(path.clone());
+                found_dirs.push(path);
             }
-            // 忽略既不是文件也不是目录的特殊文件
         }
     }
 
-    // 5. 扫描完成后，返回收集到的文件路径列表
-    Ok(found_files)
+    // 规范化输入目录后存入 HashSet
+    let input_dirs_set: HashSet<PathBuf> = input_dirs
+        .into_iter()
+        .map(|p| p.canonicalize().unwrap_or(p))
+        .collect();
+
+    // 从 found_dirs 中移除恰好等于输入目录的项
+    let filtered_dirs = found_dirs
+        .into_iter()
+        .filter(|dir| {
+            let canon = dir.canonicalize().unwrap_or(dir.clone());
+            !input_dirs_set.contains(&canon)
+        })
+        .collect::<Vec<_>>();
+
+    Ok((found_files, filtered_dirs))
 }
 
 #[async_trait]
@@ -95,7 +113,7 @@ pub trait Locker: Send + Sync + 'static {
     }
 
 
-    async fn lock(&self, filepath: PathBuf, password: String) 
+    async fn lock(&self, filepath: &PathBuf, password: String) 
         -> tokio::io::Result<()>
     {
         if self.is_locked(filepath.clone()).await? {
@@ -108,7 +126,7 @@ pub trait Locker: Send + Sync + 'static {
         write_trailer(&filepath, self.locker_id(), &password).await
     }
 
-    async fn unlock(&self, filepath: PathBuf, password: String) 
+    async fn unlock(&self, filepath: &PathBuf, password: String) 
         -> tokio::io::Result<()>
     {
         if !verify_trailer(&filepath, self.locker_id(), &password).await? {
@@ -118,7 +136,7 @@ pub trait Locker: Send + Sync + 'static {
             ));
         }
         remove_trailer(&filepath).await?;
-        self.unlock_inner(filepath, password).await
+        self.unlock_inner(filepath.clone(), password).await
     }
 }
 
@@ -285,6 +303,13 @@ pub async fn remove_trailer<P: AsRef<Path>>(path: P) -> tokio::io::Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Debug)]
+enum DirLockManagerTaskFlag {
+    Lock,
+    UnLock,
+    NoTask,
+}
+
 #[derive(Clone)]
 pub struct DirLockManager {
     semaphore: Arc<Semaphore>,
@@ -317,25 +342,25 @@ impl DirLockManager {
     }
 
     /// 等待所有 spawn 的任务执行完
-    pub async fn wait_all(&self) {
+    pub async fn wait_all_file_tasks(&self) {
         let mut set = self.joinset.clone().lock_owned().await;
         while let Some(res) = set.join_next().await {
             if let Err(e) = res {
-                eprintln!("后台任务 panic: {}", e);
+                error!("后台任务 panic: {}", e);
             }
         }
         self.is_done.store(true, Ordering::SeqCst);
     }
 
-    pub async fn lock(&self) {
+    pub async fn lock(& self, process_filename: bool, process_dirname: bool) {
         let j = self.joinset.clone();
 
         let fd = scan_files_iterative(&self.paths).await;
         if let Err(e) = &fd {
-            eprintln!("扫描目录时出错: {:?}", e);
+            error!("扫描目录时出错: {:?}", e);
             return;
         }
-        let files = fd.unwrap();
+        let (files, dirs) = fd.unwrap();
 
         // 先设置总数（避免 race / 除零 / UI 无基数）
         self.progress_total.store(files.len() as u64, Ordering::SeqCst);
@@ -356,28 +381,42 @@ impl DirLockManager {
                 // 先获取 permit（或先 inc total，已经预先设置了 total）
                 let _permit = sem.acquire().await.expect("semaphore closed");
 
-                if let Err(e) = locker2.lock(file_path, pwd2.as_ref().clone()).await {
+                if let Err(e) = locker2.lock(&file_path, pwd2.as_ref().clone()).await {
                     progress_err.fetch_add(1, Ordering::SeqCst);
-                    eprintln!("加密文件时出错: {}", e);
+                    error!("加密文件时出错: {}", e);
                 } else {
                     progress_done.fetch_add(1, Ordering::SeqCst);
                 }
+                // 加密文件名
+                if process_filename{
+                    if let Err(e) = lock_pathname_on_fs(&file_path){
+                        error!("加密文件名时出错: {}", e);
+                    }
+                }
             });
         }
-
         // 等待全部完成
-        self.wait_all().await;
+        self.wait_all_file_tasks().await;
+
+        if process_dirname{
+            // 加密文件夹
+            for dir in dirs.iter().rev(){
+                if let Err(e) = lock_pathname_on_fs(dir){
+                    error!("dir lock error: {}", e);
+                }
+            }
+        }
     }
 
-    pub async fn unlock(&self) {
+    pub async fn unlock(& self) {
         let j = self.joinset.clone();
 
         let fd = scan_files_iterative(&self.paths).await;
         if let Err(e) = &fd {
-            eprintln!("扫描目录时出错: {:?}", e);
+            error!("扫描目录时出错: {:?}", e);
             return;
         }
-        let files = fd.unwrap();
+        let (files,  dirs) = fd.unwrap();
 
         // 先设置总数（避免 race / 除零 / UI 无基数）
         self.progress_total.store(files.len() as u64, Ordering::SeqCst);
@@ -398,17 +437,27 @@ impl DirLockManager {
                 // 先获取 permit（或先 inc total，已经预先设置了 total）
                 let _permit = sem.acquire().await.expect("semaphore closed");
 
-                if let Err(e) = locker2.unlock(file_path, pwd2.as_ref().clone()).await {
+                if let Err(e) = locker2.unlock(&file_path, pwd2.as_ref().clone()).await {
                     progress_err.fetch_add(1, Ordering::SeqCst);
-                    eprintln!("解密文件时出错: {}", e);
+                    error!("解密文件时出错: {}", e);
                 } else {
                     progress_done.fetch_add(1, Ordering::SeqCst);
                 }
+                // 解密文件名
+                if let Err(e) = unlock_pathname_on_fs(&file_path){
+                    error!("加密文件名时出错: {}", e);
+                }
             });
         }
-
         // 等待全部完成
-        self.wait_all().await;
+        self.wait_all_file_tasks().await;
+
+        // 解密文件夹
+        for dir in dirs.iter().rev(){
+            if let Err(e) = unlock_pathname_on_fs(dir){
+                error!("dir lock error: {}", e);
+            }
+        }
     }
 
     pub fn get_total_count(&self) -> u64 {
