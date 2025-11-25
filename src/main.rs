@@ -1,28 +1,25 @@
 mod file_locker;
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use eframe::egui;
-use egui::{ComboBox, Style};
-use rfd::{AsyncFileDialog, MessageDialog};
-use tracing::{info, warn, debug, error};
+use egui::{ComboBox};
+use rfd::{AsyncFileDialog};
+use tracing::{info, error};
 use tracing_subscriber::{fmt, EnvFilter};
 
 const SIMPLE_LOCK_DEFAULT_PASSWORD: &str = "laull";
 
-/// 一个基于 RAII 的计时器
+/// 计时器
 #[derive(Debug, Clone)]
 struct Timer {
     start_time: Instant,
-    name: &'static str,
 }
 
 impl Timer {
-    fn new(name: &'static str) -> Self {
+    fn new() -> Self {
         Timer {
             start_time: Instant::now(),
-            name,
         }
     }
 
@@ -181,7 +178,7 @@ impl FileLockerApp {
             return;
         }
         self.operation = Operation::Locking;
-        self.timer = Some(Timer::new("加密"));
+        self.timer = Some(Timer::new());
         let manager = self.locker_manager.clone();
         let process_rename_file = self.ui_process_rename_file;
         let process_rename_dir =  self.ui_process_rename_dir;
@@ -204,7 +201,7 @@ impl FileLockerApp {
             return;
         }
         self.operation = Operation::Unlocking;
-        self.timer = Some(Timer::new("解密"));
+        self.timer = Some(Timer::new());
         let manager = self.locker_manager.clone();
         let err_messages = self.err_messages.clone();
         // 后台执行
@@ -302,9 +299,7 @@ impl eframe::App for FileLockerApp {
                         .auto_shrink([false; 2])     // 不要自动收缩
                         .show(ui, |ui| {
                             ui.add(
-                                egui::TextEdit::multiline(&mut text.clone()) // 用 clone 避免修改原数据
-                                    .interactive(false)                     // 禁止用户编辑
-                                    .desired_width(f32::INFINITY)           // 自动拉伸宽度
+                                egui::Label::new(text)
                             );
                         });
                     
@@ -437,7 +432,7 @@ impl eframe::App for FileLockerApp {
 async fn main() -> Result<(), eframe::Error> {
 
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new("debug"))
+        .with_env_filter(EnvFilter::new("error"))
         .with_timer(fmt::time::UtcTime::rfc_3339()) // 使用 UTC 时间和 RFC3339 格式
         .init();
 

@@ -1,12 +1,9 @@
 use super::base::{
-    Locker,
-    read_trailer_if_exists,
-    remove_trailer,
-    verify_trailer,
+    Locker
 };
-use std::path::{Path, PathBuf};
+use std::path::{PathBuf};
 use tokio::fs::{self, File};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncSeekExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use async_trait::async_trait;
 use ring::{aead, hkdf, rand};
 use ring::rand::SecureRandom;
@@ -118,8 +115,6 @@ impl Locker for ChaChaLocker {
     async fn unlock_inner(&self, filepath: PathBuf, password: String) -> tokio::io::Result<()> {
         // 打开加密文件
         let mut src = File::open(&filepath).await?;
-        let metadata = src.metadata().await?;
-        let enc_len = metadata.len();
 
         // 读取并解析初始 12 字节 nonce（prefix + counter=0）；
         let mut nonce0 = [0u8; NONCE_LEN];
@@ -170,15 +165,19 @@ impl Locker for ChaChaLocker {
 mod tests {
     use super::*;
     use ::rand::TryRngCore;
-    use tokio::fs::{self, File};
+    use tokio::fs::{File};
     use tokio::io::{AsyncWriteExt, AsyncReadExt};
     use tempfile::tempdir;
+    use super::super::base::{
+        read_trailer_if_exists,
+        verify_trailer,
+    };
 
     const PASSWORD: &str = "mypassword";
 
     /// 生成随机内容（可选大文件用）
     async fn write_random_file(path: &std::path::Path, size: usize) {
-        use ::rand::{RngCore, rngs::OsRng};
+        use ::rand::{rngs::OsRng};
         let mut data = vec![0u8; size];
         let _ = OsRng.try_fill_bytes(&mut data);
 

@@ -77,7 +77,6 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
-    use std::path::Path;
 
     #[test]
     fn test_file_lock_unlock() {

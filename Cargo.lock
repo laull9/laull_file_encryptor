@@ -3038,8 +3038,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "rust_test"
-version = "0.1.0"
+name = "rust_laull_filelocker"
+version = "1.1.0"
 dependencies = [
  "aes",
  "anyhow",

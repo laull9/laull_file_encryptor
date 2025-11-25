@@ -1,7 +1,5 @@
 use std::collections::{HashSet, VecDeque};
-use std::fmt::format;
 use std::path::{Path, PathBuf};
-use std::process;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::fs::{self, File};
@@ -26,7 +24,7 @@ const TRAILER_LEN: usize = TRAITER_ID_LEN + TRAITER_TAG_LEN + TRAILER_FINISH_TAG
 
 const HEADER_LEN: usize = 1024;    // read first 1KB to compute tag
 
-pub async fn scan_files_iterative(paths: &Vec<String>) -> tokio::io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+pub async fn scan_files_iterative(paths: &Vec<String>, err_buf: Arc<AsyncMutex<Vec<String>>>) -> tokio::io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     let mut directories_to_process = VecDeque::new();
     let mut found_files = Vec::new();
     let mut found_dirs = Vec::new();
@@ -40,7 +38,9 @@ pub async fn scan_files_iterative(paths: &Vec<String>) -> tokio::io::Result<(Vec
         let metadata = match fs::metadata(&path).await {
             Ok(meta) => meta,
             Err(e) => {
-                error!("路径 '{}' 不存在或无法访问: {}", path.display(), e);
+                let err = format!("路径 '{}' 不存在或无法访问: {}", path.display(), e);
+                error!("{}", err);
+                err_buf.lock().await.push(err);
                 continue;
             }
         };
@@ -59,7 +59,9 @@ pub async fn scan_files_iterative(paths: &Vec<String>) -> tokio::io::Result<(Vec
         let mut entries = match fs::read_dir(&current_dir).await {
             Ok(entries) => entries,
             Err(e) => {
-                error!("无法读取目录 '{}': {}", current_dir.display(), e);
+                let err = format!("无法读取目录 '{}': {}", current_dir.display(), e);
+                error!("{}", err);
+                err_buf.lock().await.push(err);
                 continue;
             }
         };
@@ -69,7 +71,9 @@ pub async fn scan_files_iterative(paths: &Vec<String>) -> tokio::io::Result<(Vec
             let metadata = match fs::metadata(&path).await {
                 Ok(meta) => meta,
                 Err(e) => {
-                    error!("无法获取文件元数据 '{}': {}", path.display(), e);
+                    let err = format!("无法获取文件元数据 '{}': {}", path.display(), e);
+                    error!("{}", err);
+                    err_buf.lock().await.push(err);
                     continue;
                 }
             };
@@ -185,7 +189,7 @@ pub async fn write_trailer<P: AsRef<Path>>(
     let path_ref = path.as_ref();
     let mut file = File::options().read(true).write(true).open(path_ref).await?;
     let mut meta = file.metadata().await?;
-    let mut file_len = meta.len();
+    let file_len = meta.len();
 
     // 如果文件尾确实包含旧 trailer，就截断旧 trailer（用当前句柄）
     if file_len >= TRAILER_LEN as u64 {
@@ -197,7 +201,6 @@ pub async fn write_trailer<P: AsRef<Path>>(
             if finish_tag == TRAILER_FINISH_TAG {
                 // 截断旧尾标：注意 set_len 会改变文件长度
                 file.set_len(file_len - TRAILER_LEN as u64).await?;
-                file_len = file_len - TRAILER_LEN as u64;
             } else {
                 // 如果不是旧尾标，不做截断；恢复到文件末尾准备追加
                 file.seek(std::io::SeekFrom::End(0)).await?;
@@ -304,13 +307,6 @@ pub async fn remove_trailer<P: AsRef<Path>>(path: P) -> tokio::io::Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Debug)]
-enum DirLockManagerTaskFlag {
-    Lock,
-    UnLock,
-    NoTask,
-}
-
 #[derive(Clone)]
 pub struct DirLockManager {
     semaphore: Arc<Semaphore>,
@@ -357,7 +353,7 @@ impl DirLockManager {
         let j = self.joinset.clone();
         let err_messages: Arc<AsyncMutex<Vec<String>>> = Arc::new(AsyncMutex::new(Vec::new()));
 
-        let fd = scan_files_iterative(&self.paths).await;
+        let fd = scan_files_iterative(&self.paths, err_messages.clone()).await;
         if let Err(e) = &fd {
             let err = format!("扫描目录时出错: {}", e);
             error!("{}", &err);
@@ -426,9 +422,11 @@ impl DirLockManager {
         let err_messages: Arc<AsyncMutex<Vec<String>>> = Arc::new(AsyncMutex::new(Vec::new()));
 
 
-        let fd = scan_files_iterative(&self.paths).await;
+        let fd = scan_files_iterative(&self.paths, err_messages.clone()).await;
         if let Err(e) = &fd {
-            error!("扫描目录时出错: {:?}", e);
+            let err = format!("扫描目录时出错: {:?}", e);
+            error!("{}", &err);
+            err_messages.lock().await.push(err);
             return err_messages.lock().await.to_vec();
         }
         let (files,  dirs) = fd.unwrap();
