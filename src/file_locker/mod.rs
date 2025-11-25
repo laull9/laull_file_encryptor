@@ -31,9 +31,9 @@ impl LockMethod {
     }
     pub fn display_name(&self) -> &str {
         match self {
-            Self::Simple => "快速加密(非完全加密)",
+            Self::Simple => "快速加密(无密码,非完全加密)",
             Self::Aes => "Aes(有硬件加速会较快,安全)",
-            Self::Chacha20 => "Chacha20(无硬件加速，安全)",
+            Self::Chacha20 => "Chacha20(无硬件加速,安全)",
         }
     }
 }

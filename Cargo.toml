@@ -27,7 +27,7 @@ ring = "0.17.14"
 tempfile = "3.23.0"
 egui = "0.33.2"
 eframe = "0.33.2"
-rfd = "0.15.4"
+rfd = "0.16.0"
 base64 = "0.22.1"
 
 [profile.release]

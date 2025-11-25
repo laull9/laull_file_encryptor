@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use eframe::egui;
 use egui::{ComboBox, Style};
-use rfd::AsyncFileDialog;
+use rfd::{AsyncFileDialog, MessageDialog};
 use tracing::{info, warn, debug, error};
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -32,7 +32,7 @@ impl Timer {
 
     fn formatted_duration(&self) -> String {
         let duration = self.elapsed();
-        format!("{:?}", duration)
+        format!("{:.3?}", duration)
     }
 }
 
@@ -60,6 +60,7 @@ struct FileLockerApp {
     ui_password_hide: bool,
     ui_process_rename_file: bool,
     ui_process_rename_dir: bool,
+    err_messages: Arc<Mutex<Vec<String>>>,
 }
 
 impl FileLockerApp {
@@ -100,6 +101,7 @@ impl FileLockerApp {
             ui_dark_mode: false,
             ui_process_rename_file: true,
             ui_process_rename_dir: true,
+            err_messages: Arc::new(Mutex::new(vec![])),
         }
     }
 
@@ -183,10 +185,14 @@ impl FileLockerApp {
         let manager = self.locker_manager.clone();
         let process_rename_file = self.ui_process_rename_file;
         let process_rename_dir =  self.ui_process_rename_dir;
+        let err_messages = self.err_messages.clone();
         // 后台执行
         if let Some(manager) = manager{
             tokio::spawn(async move {
-                manager.lock(process_rename_file, process_rename_dir).await;
+                *err_messages.lock().unwrap() = manager.lock(
+                    process_rename_file, 
+                    process_rename_dir
+                ).await;
                 info!("加密完成");
             });
         }
@@ -200,10 +206,12 @@ impl FileLockerApp {
         self.operation = Operation::Unlocking;
         self.timer = Some(Timer::new("解密"));
         let manager = self.locker_manager.clone();
+        let err_messages = self.err_messages.clone();
         // 后台执行
         if let Some(manager) = manager{
             tokio::spawn(async move {
-                manager.unlock().await;
+               *err_messages.lock().unwrap() = 
+                    manager.unlock().await;
                 info!("解密完成");
             });
         }
@@ -228,10 +236,11 @@ impl FileLockerApp {
         self.is_working = false;
         if let Some(timer) = &self.timer {
             self.result_message = format!(
-                "操作完成！成功{}个 失败{}个 \n耗时: {}",
+                "操作完成！成功{}个 失败{}个 \n耗时: {}\n{}",
                 self.done_count,
                 self.err_count,
-                timer.formatted_duration()
+                timer.formatted_duration(),
+                self.err_messages.lock().unwrap().join("\n")
             );
         }
         self.operation = Operation::None;
@@ -262,7 +271,11 @@ impl eframe::App for FileLockerApp {
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("文件加密 / 解密工具");
+            ui.horizontal(|ui|{
+                ui.heading("Laull的文件加密 / 解密器");
+                ui.hyperlink_to("My Website", "https://laull.top");
+            });
+
             ui.add_space(10.0);
 
             // ================================
@@ -376,7 +389,13 @@ impl eframe::App for FileLockerApp {
                 |ui| {
                     if !self.result_message.is_empty() {
                         ui.group(|ui| {
-                            ui.label(&self.result_message);
+                            egui::ScrollArea::vertical()
+                                .id_salt("result_scroll")
+                                .auto_shrink([false; 2])      // 不自动收缩，保持固定区域
+                                .max_height(70.0)            // 设置固定高度
+                                .show(ui, |ui| {
+                                    ui.label(&self.result_message);
+                                });
                         });
                     }
                 }
@@ -424,13 +443,13 @@ async fn main() -> Result<(), eframe::Error> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([600.0, 470.0])
+            .with_inner_size([600.0, 500.0])
             .with_min_inner_size([400.0, 300.0]),
         ..Default::default()
     };
 
     eframe::run_native(
-        "文件加密解密工具",
+        "文件加密解密工具@laull",
         options,
         Box::new(|_cc| 
             Ok(Box::new(FileLockerApp::new(&_cc.egui_ctx)))),

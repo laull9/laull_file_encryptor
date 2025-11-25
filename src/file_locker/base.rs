@@ -1,4 +1,5 @@
 use std::collections::{HashSet, VecDeque};
+use std::fmt::format;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
@@ -119,7 +120,7 @@ pub trait Locker: Send + Sync + 'static {
         if self.is_locked(filepath.clone()).await? {
             return Err(tokio::io::Error::new(
                 tokio::io::ErrorKind::AlreadyExists,
-                "File is already locked",
+                "文件已被加密",
             ));
         }
         self.lock_inner(filepath.clone(), password.clone()).await?;
@@ -132,7 +133,7 @@ pub trait Locker: Send + Sync + 'static {
         if !verify_trailer(&filepath, self.locker_id(), &password).await? {
             return Err(tokio::io::Error::new(
                 tokio::io::ErrorKind::InvalidData,
-                "Wrong password or file is not locked by this Locker",
+                "密码错误或者解密方式错误",
             ));
         }
         remove_trailer(&filepath).await?;
@@ -352,13 +353,16 @@ impl DirLockManager {
         self.is_done.store(true, Ordering::SeqCst);
     }
 
-    pub async fn lock(& self, process_filename: bool, process_dirname: bool) {
+    pub async fn lock(& self, process_filename: bool, process_dirname: bool) -> Vec<String> {
         let j = self.joinset.clone();
+        let err_messages: Arc<AsyncMutex<Vec<String>>> = Arc::new(AsyncMutex::new(Vec::new()));
 
         let fd = scan_files_iterative(&self.paths).await;
         if let Err(e) = &fd {
-            error!("扫描目录时出错: {:?}", e);
-            return;
+            let err = format!("扫描目录时出错: {}", e);
+            error!("{}", &err);
+            err_messages.lock().await.push(err);
+            return err_messages.lock().await.to_vec();
         }
         let (files, dirs) = fd.unwrap();
 
@@ -369,6 +373,7 @@ impl DirLockManager {
         self.progress_err.store(0, Ordering::SeqCst);
 
         for file_path in files {
+            let err_buf = err_messages.clone();
             let sem = self.semaphore.clone();
             let pwd2 = self.password.clone();
             let locker2 = self.locker.clone();
@@ -383,14 +388,18 @@ impl DirLockManager {
 
                 if let Err(e) = locker2.lock(&file_path, pwd2.as_ref().clone()).await {
                     progress_err.fetch_add(1, Ordering::SeqCst);
-                    error!("加密文件时出错: {}", e);
+                    let err = format!("加密文件时出错: {}", e);
+                    error!("{}", &err);
+                    err_buf.lock().await.push(err);
                 } else {
                     progress_done.fetch_add(1, Ordering::SeqCst);
                 }
                 // 加密文件名
                 if process_filename{
                     if let Err(e) = lock_pathname_on_fs(&file_path){
-                        error!("加密文件名时出错: {}", e);
+                        let err = format!("加密文件名时出错: {}", e);
+                        error!("{}", &err);
+                        err_buf.lock().await.push(err);
                     }
                 }
             });
@@ -402,19 +411,25 @@ impl DirLockManager {
             // 加密文件夹
             for dir in dirs.iter().rev(){
                 if let Err(e) = lock_pathname_on_fs(dir){
-                    error!("dir lock error: {}", e);
+                    let err = format!("加密文件夹出错: {}", e);
+                    error!("{}", &err);
+                    err_messages.lock().await.push(err);
                 }
             }
         }
+
+        err_messages.lock().await.to_vec()
     }
 
-    pub async fn unlock(& self) {
+    pub async fn unlock(& self) -> Vec<String> {
         let j = self.joinset.clone();
+        let err_messages: Arc<AsyncMutex<Vec<String>>> = Arc::new(AsyncMutex::new(Vec::new()));
+
 
         let fd = scan_files_iterative(&self.paths).await;
         if let Err(e) = &fd {
             error!("扫描目录时出错: {:?}", e);
-            return;
+            return err_messages.lock().await.to_vec();
         }
         let (files,  dirs) = fd.unwrap();
 
@@ -425,6 +440,7 @@ impl DirLockManager {
         self.progress_err.store(0, Ordering::SeqCst);
 
         for file_path in files {
+            let err_buf = err_messages.clone();
             let sem = self.semaphore.clone();
             let pwd2 = self.password.clone();
             let locker2 = self.locker.clone();
@@ -439,13 +455,17 @@ impl DirLockManager {
 
                 if let Err(e) = locker2.unlock(&file_path, pwd2.as_ref().clone()).await {
                     progress_err.fetch_add(1, Ordering::SeqCst);
-                    error!("解密文件时出错: {}", e);
+                    let err = format!("解密文件时出错: {}", e);
+                    error!("{}", &err);
+                    err_buf.lock().await.push(err);
                 } else {
                     progress_done.fetch_add(1, Ordering::SeqCst);
                 }
                 // 解密文件名
                 if let Err(e) = unlock_pathname_on_fs(&file_path){
-                    error!("加密文件名时出错: {}", e);
+                    let err = format!("加密文件名时出错: {}", e);
+                    error!("{}", &err);
+                    err_buf.lock().await.push(err); 
                 }
             });
         }
@@ -455,9 +475,13 @@ impl DirLockManager {
         // 解密文件夹
         for dir in dirs.iter().rev(){
             if let Err(e) = unlock_pathname_on_fs(dir){
-                error!("dir lock error: {}", e);
+                let err = format!("解密文件夹出错: {}", e);
+                error!("{}", &err);
+                err_messages.lock().await.push(err);
             }
         }
+
+        err_messages.lock().await.to_vec()
     }
 
     pub fn get_total_count(&self) -> u64 {
