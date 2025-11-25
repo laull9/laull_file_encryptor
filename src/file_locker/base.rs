@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use sha2::{Sha256, Digest};
@@ -295,6 +295,7 @@ pub struct DirLockManager {
     progress_total: Arc<AtomicU64>,
     progress_done: Arc<AtomicU64>,
     progress_err: Arc<AtomicU64>,
+    is_done: Arc<AtomicBool>,
 }
 
 impl DirLockManager {
@@ -311,6 +312,7 @@ impl DirLockManager {
             progress_total: Arc::new(AtomicU64::new(0)),
             progress_done: Arc::new(AtomicU64::new(0)),
             progress_err: Arc::new(AtomicU64::new(0)),
+            is_done: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -322,6 +324,7 @@ impl DirLockManager {
                 eprintln!("后台任务 panic: {}", e);
             }
         }
+        self.is_done.store(true, Ordering::SeqCst);
     }
 
     pub async fn lock(&self) {
@@ -418,6 +421,10 @@ impl DirLockManager {
 
     pub fn get_err_count(&self) -> u64 {
         self.progress_err.load(Ordering::SeqCst)
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.is_done.load(Ordering::SeqCst)
     }
 
 }

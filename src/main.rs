@@ -51,6 +51,8 @@ struct FileLockerApp {
     timer: Option<Timer>,
     result_message: String,
     is_working: bool,
+
+    ui_password_hide: bool,
 }
 
 impl FileLockerApp {
@@ -82,6 +84,7 @@ impl FileLockerApp {
             timer: None,
             result_message: String::new(),
             is_working: false,
+            ui_password_hide: true,
         }
     }
 
@@ -181,7 +184,9 @@ impl FileLockerApp {
             let err_count = self.locker_manager.as_ref().unwrap().get_err_count();
             self.progress = done_count as f32 / total_count as f32 ;
             
-            if total_count <= done_count + err_count {
+            if total_count <= done_count + err_count && 
+                self.locker_manager.as_ref().unwrap().is_done() 
+            {
                 self.operation_complete();
             }
         }
@@ -204,111 +209,124 @@ impl FileLockerApp {
 
 impl eframe::App for FileLockerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // 更新进度（模拟）
         self.update_progress();
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("文件加密/解密工具");
-            
-            // 文件选择区域
-            ui.group(|ui| {
-                ui.label("选择文件或文件夹:");
-                ui.horizontal(|ui| {
-                    if ui.button("选择文件").clicked() {
-                        self.select_files();
-                    }
-                    if ui.button("选择文件夹").clicked() {
-                        self.select_folder();
-                    }
+            ui.heading("文件加密 / 解密工具");
+            ui.add_space(10.0);
+
+            // ================================
+            // 文件选择 + 路径显示（左右结构）
+            // ================================
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label("选择文件或文件夹");
+
+                    ui.horizontal(|ui| {
+                        if ui.button("选择文件").clicked() {
+                            self.select_files();
+                        }
+                        if ui.button("选择文件夹").clicked() {
+                            self.select_folder();
+                        }
+                    });
+
+                    let files = self.selected_files.lock().unwrap();
+                    ui.separator();
+                    
+                    ui.label(format!("已选择： 共{}个", files.len()));
+                    let text = files.join("\n");
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false; 2])     // 不要自动收缩
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut text.clone()) // 用 clone 避免修改原数据
+                                    .interactive(false)                     // 禁止用户编辑
+                                    .desired_width(f32::INFINITY)           // 自动拉伸宽度
+                            );
+                        });
+                    
                 });
-                
-                // 显示已选择的文件
-                if !self.selected_files.lock().unwrap().is_empty() {
-                    ui.label("已选择:");
-                    for file in self.selected_files.lock().unwrap().clone() {
-                        ui.label(file);
+            });
+
+            ui.add_space(10.0);
+
+            // ================================
+            // 密码输入区域
+            // ================================
+            ui.horizontal(|ui| {
+                ui.label("密码:");
+                ui.add(egui::TextEdit::singleline(&mut self.password)
+                    .password(self.ui_password_hide));
+                let button_hide_text = if self.ui_password_hide {
+                    "显示"
+                }else{
+                    "隐藏"
+                };
+                if ui.button(button_hide_text).clicked() {
+                    self.ui_password_hide = !self.ui_password_hide;
+                }
+            });
+            
+            ui.add_space(10.0);
+
+            // ================================
+            // 操作 + 进度（左右布局）
+            // ================================
+            // 按钮区域
+            ui.horizontal(|ui| {
+                if ui.add_enabled(!self.is_working,
+                    egui::Button::new("加密").min_size(egui::vec2(80.0, 23.0))
+                ).clicked() {
+                    self.lock_files();
+                }
+
+                if ui.add_enabled(!self.is_working,
+                    egui::Button::new("解密").min_size(egui::vec2(80.0, 23.0))
+                ).clicked() {
+                    self.unlock_files();
+                }
+            });
+
+            // 结果区域
+            ui.with_layout(
+                egui::Layout::top_down(egui::Align::Center),
+                |ui| {
+                    if !self.result_message.is_empty() {
+                        ui.group(|ui| {
+                            ui.label(&self.result_message);
+                        });
+                    }
+                }
+            );
+
+
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(10.0);
+            // 右侧进度显示
+            ui.horizontal(|ui| {
+                if self.is_working {
+                    ui.label(match self.operation {
+                        Operation::Locking => "加密中...",
+                        Operation::Unlocking => "解密中...",
+                        _ => "",
+                    });
+
+                    ui.add(
+                        egui::ProgressBar::new(self.progress)
+                            .desired_width(200.0)
+                            .show_percentage(),
+                    );
+
+                    if let Some(t) = &self.timer {
+                        ui.label(format!("已运行: {}", t.formatted_duration()));
                     }
                 }
             });
 
-            ui.separator();
-
-            // 路径输入区域
-            ui.group(|ui| {
-                ui.label("路径:");
-                let paths: Vec<String> = self.selected_files
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .map(|p| p.to_string())
-                    .collect();
-                ui.text_edit_singleline(&mut paths.join(" "));
-            });
-
-            // 密码输入区域
-            ui.group(|ui| {
-                ui.label("密码:");
-                ui.text_edit_singleline(&mut self.password);
-            });
-
-            ui.separator();
-
-            // 操作按钮区域
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    if ui.add_enabled(!self.is_working, egui::Button::new("🔒 加密")).clicked() {
-                        self.lock_files();
-                    }
-                    
-                    if ui.add_enabled(!self.is_working, egui::Button::new("🔓 解密")).clicked() {
-                        self.unlock_files();
-                    }
-                });
-
-                // 进度显示区域
-                ui.vertical(|ui| {
-                    if self.is_working {
-                        let operation_text = match self.operation {
-                            Operation::Locking => "加密中...",
-                            Operation::Unlocking => "解密中...",
-                            Operation::None => "",
-                        };
-                        
-                        ui.label(operation_text);
-                        ui.add(egui::ProgressBar::new(self.progress).show_percentage());
-                        
-                        if let Some(timer) = &self.timer {
-                            ui.label(format!("已运行: {}", timer.formatted_duration()));
-                        }
-                    }
-                });
-            });
-
-            ui.separator();
-
-            // 结果显示区域
-            if !self.result_message.is_empty() {
-                ui.group(|ui| {
-                    ui.label("操作结果:");
-                    ui.label(&self.result_message);
-                });
-            }
-
-            // 状态栏
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label("状态:");
-                    if self.is_working {
-                        ui.label("工作中");
-                    } else {
-                        ui.label("就绪");
-                    }
-                });
-            });
         });
 
-        // 请求重绘以更新进度
         ctx.request_repaint();
     }
 }
@@ -323,7 +341,7 @@ async fn main() -> Result<(), eframe::Error> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([600.0, 400.0])
+            .with_inner_size([600.0, 600.0])
             .with_min_inner_size([400.0, 300.0]),
         ..Default::default()
     };
