@@ -3,14 +3,21 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use std::fs;
 
 const LOCK_PREFIX: &str = "$$";
+const MAX_FILENAME_LEN: usize = 255;
 
 /// 字符串加密
-fn try_lockname(original: &str) -> String {
+fn try_lockname(original: &str) -> Result<String, String> {
     if original.starts_with(LOCK_PREFIX) {
-        return original.to_string();
+        return Ok(original.to_string());
     }
     let enc = URL_SAFE_NO_PAD.encode(original.as_bytes());
-    format!("{}{}", LOCK_PREFIX, enc)
+    let locked_name = format!("{}{}", LOCK_PREFIX, enc);
+
+    if locked_name.len() > MAX_FILENAME_LEN {
+        return Err(format!("名称太长无法加密: {}", original));
+    }
+
+    Ok(locked_name)
 }
 
 /// 字符串解密
@@ -26,16 +33,16 @@ fn try_unlockname(name: &str) -> Result<String, String> {
 }
 
 /// 对 PathBuf 的文件名或目录名加密（处理最后一级，返回新的 PathBuf）
-fn try_lock_path(path: &PathBuf) -> PathBuf {
+fn try_lock_path(path: &PathBuf) -> Result<PathBuf, String> {
     let parent = path.parent();
     let name = path.file_name()
-        .unwrap_or_default()
+        .ok_or("missing filename or directory name")?
         .to_string_lossy();
-    let new_name = try_lockname(&name);
-    match parent {
+    let new_name = try_lockname(&name)?;
+    Ok(match parent {
         Some(p) => p.join(new_name),
         None => PathBuf::from(new_name),
-    }
+    })
 }
 
 /// 对 PathBuf 的文件名或目录名解密（处理最后一级）
@@ -53,10 +60,10 @@ fn try_unlock_path(path: &PathBuf) -> Result<PathBuf, String> {
 
 /// 在文件系统上对路径进行加密（重命名文件/目录）
 pub fn lock_pathname_on_fs(path: &PathBuf) -> Result<PathBuf, String> {
-    let locked_path = try_lock_path(path);
+    let locked_path = try_lock_path(path)?;
     if path.exists() && path != &locked_path {
         fs::rename(path, &locked_path)
-            .map_err(|e| format!("fs rename error: {}", e))?;
+            .map_err(|e| format!("混淆错误: {}", e))?;
     }
     Ok(locked_path)
 }
@@ -66,7 +73,7 @@ pub fn unlock_pathname_on_fs(path: &PathBuf) -> Result<PathBuf, String> {
     let unlocked_path = try_unlock_path(path)?;
     if path.exists() && path != &unlocked_path {
         fs::rename(path, &unlocked_path)
-            .map_err(|e| format!("fs rename error: {}", e))?;
+            .map_err(|e| format!("混淆错误: {}", e))?;
     }
     Ok(unlocked_path)
 }
@@ -81,7 +88,7 @@ mod tests {
     #[test]
     fn test_file_lock_unlock() {
         let original = PathBuf::from("example.txt");
-        let locked = try_lock_path(&original);
+        let locked = try_lock_path(&original).unwrap();
         assert!(locked.file_name().unwrap().to_string_lossy().starts_with(LOCK_PREFIX));
         let unlocked = try_unlock_path(&locked).expect("should decode");
         assert_eq!(original, unlocked);
@@ -90,7 +97,7 @@ mod tests {
     #[test]
     fn test_dir_lock_unlock() {
         let original = PathBuf::from("测试目录");
-        let locked = try_lock_path(&original);
+        let locked = try_lock_path(&original).unwrap();
         assert!(locked.file_name().unwrap().to_string_lossy().starts_with(LOCK_PREFIX));
         let unlocked = try_unlock_path(&locked).expect("should decode");
         assert_eq!(original, unlocked);

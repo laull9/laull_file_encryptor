@@ -29,6 +29,8 @@ egui = "0.33.2"
 eframe = "0.33.2"
 rfd = "0.16.0"
 base64 = "0.22.1"
+winres = "0.1.12"
+image = "0.24.0"
 
 [profile.release]
 # opt-level = "z"        # 优先优化体积（比"3"更小，牺牲部分速度）
@@ -38,14 +40,8 @@ panic = "abort"        #  panic时直接终止（移除unwind回溯代码，节�
 strip = true           # 移除调试符号（release模式下有效）
 debug = false          # 关闭调试信息
 
-[target.x86_64-pc-windows-msvc]
-rustflags = [
-  "-C", "target-feature=+crt-static",  # 静态链接 MSVC 运行时（关键）
-]
+[package.metadata.bundle]
+name = "rust_laull_filelocker"
+identifier = "com.laull.filelocker"
 
-# 针对 Windows GNU 工具链（x86_64-pc-windows-gnu，若你用 MinGW）
-[target.x86_64-pc-windows-gnu]
-rustflags = [
-  "-C", "target-feature=+crt-static",  # 静态链接 MinGW 运行时
-  "-C", "link-arg=-Wl,--allow-multiple-definition",  # GNU 专属兼容选项
-]
+icon = ["assets/ico/l.ico", "assets/ico/l.png"]

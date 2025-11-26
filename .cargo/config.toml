@@ -1,0 +1,25 @@
+[build]
+# target = "x86_64-pc-windows-msvc"
+
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-Ctarget-feature=+crt-static",   # 静态链接 MSVC CRT
+]
+
+
+[target.x86_64-pc-windows-gnu]
+rustflags = [
+    "-Ctarget-feature=+crt-static",
+    "-Clink-arg=-static-libgcc",
+    "-Clink-arg=-static-libstdc++"
+]
+
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = [
+    "-C", "link-arg=-fuse-ld=lld"
+]
+
+#  macOS
+[target.x86_64-apple-darwin]
+rustflags = []

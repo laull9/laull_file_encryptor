@@ -1,3 +1,4 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod file_locker;
 
 use std::sync::{Arc, Mutex};
@@ -63,7 +64,7 @@ struct FileLockerApp {
 impl FileLockerApp {
     fn new(_ctx: &egui::Context) -> Self {
 
-        let custom_font_data = include_bytes!("../font/LXGWWenKaiLite-Regular.ttf");
+        let custom_font_data = include_bytes!("../assets/font/LXGWWenKaiLite-Regular.ttf");
         let mut fonts = egui::FontDefinitions::default();
         fonts.font_data.insert(
             "CustomFont".to_string(),
@@ -78,7 +79,8 @@ impl FileLockerApp {
 
         _ctx.set_fonts(fonts);
 
-        _ctx.set_pixels_per_point(2.5);
+        info!("pixels_per_point: {}", _ctx.pixels_per_point());
+        _ctx.set_pixels_per_point(_ctx.pixels_per_point() * 1.25);
 
         _ctx.set_visuals(egui::Visuals::light());
 
@@ -432,16 +434,24 @@ impl eframe::App for FileLockerApp {
 async fn main() -> Result<(), eframe::Error> {
 
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new("error"))
+        .with_env_filter(EnvFilter::from_default_env())
         .with_timer(fmt::time::UtcTime::rfc_3339()) // 使用 UTC 时间和 RFC3339 格式
         .init();
 
-    let options = eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([600.0, 500.0])
+            .with_inner_size([700.0, 500.0])
             .with_min_inner_size([400.0, 300.0]),
         ..Default::default()
     };
+
+    // 加载图标
+    let icon_data = include_bytes!("../assets/ico/l.png");
+    let img = image::load_from_memory_with_format(icon_data, image::ImageFormat::Png).unwrap();
+    let rgba_data = img.into_rgba8();
+    let (w,h)=(rgba_data.width(),rgba_data.height());
+    let raw_data: Vec<u8> = rgba_data.into_raw();
+    options.viewport.icon=Some(Arc::<egui::IconData>::new(egui::IconData { rgba:  raw_data, width: w, height: h }));
 
     eframe::run_native(
         "文件加密解密工具@laull",
