@@ -1,5 +1,5 @@
 use super::base::{
-    Locker
+    Encryptor
 };
 use std::path::{PathBuf};
 use tokio::fs::{self, File};
@@ -15,14 +15,14 @@ const PLAINTEXT_CHUNK_SIZE: usize = 64 * 1024; // 每块 64KiB 明文
 const AEAD_TAG_LEN: usize = 16; // ChaCha20-Poly1305 tag 长度
 const NONCE_PREFIX_LEN: usize = 4; // 我们用 4 字节随机前缀 + 8 字节计数器 -> 12 字节 nonce
 const NONCE_LEN: usize = 12;
-const HKDF_SALT: &[u8] = b"cha-cha-locker-salt"; // 派生盐（可固定或参数化）
+const HKDF_SALT: &[u8] = b"cha-cha-encryptor-salt"; // 派生盐（可固定或参数化）
 
 // 需要你已有的 trait & helper 函数（write_trailer, remove_trailer, ...）在同一模块可见
-// 假设 Locker trait 如你已给出（locker_id, lock_inner, unlock_inner 等）。
+// 假设 Encryptor trait 如你已给出（encryptor_id, lock_inner, unlock_inner 等）。
 
-pub struct ChaChaLocker;
+pub struct ChaChaEncryptor;
 
-impl ChaChaLocker {
+impl ChaChaEncryptor {
     pub fn new() -> Self {
         Self
     }
@@ -48,8 +48,8 @@ impl ChaChaLocker {
 }
 
 #[async_trait]
-impl Locker for ChaChaLocker {
-    fn locker_id(&self) -> [u8; 4] {
+impl Encryptor for ChaChaEncryptor {
+    fn encryptor_id(&self) -> [u8; 4] {
         *b"CC20"
     }
 
@@ -76,7 +76,7 @@ impl Locker for ChaChaLocker {
         // 写出前缀（12 字节 nonce 的前 4 字节；后续解密会使用）
         // 我们只写 12 字节 nonce-prefix? 实际上我们只 need to write the 4-byte prefix; but to keep simplicity write 12? 
         // 这里写出全部 12 字节 initial nonce (prefix + counter=0) 方便读取；写出 prefix + counter(0) 即 12 字节
-        let initial_nonce = ChaChaLocker::nonce_from_prefix_counter(&prefix, 0);
+        let initial_nonce = ChaChaEncryptor::nonce_from_prefix_counter(&prefix, 0);
         dst.write_all(initial_nonce.as_ref()).await?;
 
         // 流式读取明文块并每块加密写入
@@ -90,7 +90,7 @@ impl Locker for ChaChaLocker {
             let mut in_out = Vec::with_capacity(n + AEAD_TAG_LEN);
             in_out.extend_from_slice(&buf[..n]);
             // seal_in_place_append_tag 需要一个 aead::Nonce
-            let nonce = ChaChaLocker::nonce_from_prefix_counter(&prefix, counter);
+            let nonce = ChaChaEncryptor::nonce_from_prefix_counter(&prefix, counter);
             // seal
             let aad = aead::Aad::empty();
             let res = less_safe.seal_in_place_separate_tag(nonce, aad, &mut in_out)
@@ -143,7 +143,7 @@ impl Locker for ChaChaLocker {
             }
             // read_buf[..n] 是 ciphertext + tag
             let mut in_out = read_buf[..n].to_vec();
-            let nonce = ChaChaLocker::nonce_from_prefix_counter(&prefix, counter);
+            let nonce = ChaChaEncryptor::nonce_from_prefix_counter(&prefix, counter);
             let aad = aead::Aad::empty();
             // open_in_place expects the tag at the end of buffer
             let plain = less_safe.open_in_place(nonce, aad, &mut in_out)
@@ -204,10 +204,10 @@ mod tests {
             f.write_all(content).await.unwrap();
         }
 
-        let locker = ChaChaLocker::new();
+        let encryptor = ChaChaEncryptor::new();
 
         // 加密
-        locker.lock(&file_path, PASSWORD.to_string())
+        encryptor.lock(&file_path, PASSWORD.to_string())
             .await.unwrap();
 
         // 加密后文件肯定不一样
@@ -215,7 +215,7 @@ mod tests {
         assert_ne!(encrypted, content);
 
         // 解密
-        locker.unlock(&file_path, PASSWORD.to_string())
+        encryptor.unlock(&file_path, PASSWORD.to_string())
             .await.unwrap();
 
         // 内容应恢复
@@ -232,17 +232,17 @@ mod tests {
         write_random_file(&file_path, 8 * 1024 * 1024).await;
         let original = read_all(&file_path).await;
 
-        let locker = ChaChaLocker::new();
+        let encryptor = ChaChaEncryptor::new();
 
         // 加密
-        locker.lock(&file_path, PASSWORD.to_string())
+        encryptor.lock(&file_path, PASSWORD.to_string())
             .await.unwrap();
 
         let encrypted = read_all(&file_path).await;
         assert!(encrypted.len() > original.len());  // 加上 nonce 和 AEAD tag
 
         // 解密
-        locker.unlock(&file_path, PASSWORD.to_string())
+        encryptor.unlock(&file_path, PASSWORD.to_string())
             .await.unwrap();
 
         let decrypted = read_all(&file_path).await;
@@ -260,14 +260,14 @@ mod tests {
             f.write_all(content).await.unwrap();
         }
 
-        let locker = ChaChaLocker::new();
+        let encryptor = ChaChaEncryptor::new();
 
         // 加密
-        locker.lock(&file_path, PASSWORD.to_string())
+        encryptor.lock(&file_path, PASSWORD.to_string())
             .await.unwrap();
 
         // 使用错误密码解密 —— 应失败
-        let result = locker.unlock(&file_path, "wrong".to_string()).await;
+        let result = encryptor.unlock(&file_path, "wrong".to_string()).await;
         assert!(result.is_err(), "应该因密码错误解密失败");
     }
 
@@ -282,10 +282,10 @@ mod tests {
             f.write_all(content).await.unwrap();
         }
 
-        let locker = ChaChaLocker::new();
+        let encryptor = ChaChaEncryptor::new();
 
         // 加密（内含写 trailer）
-        locker.lock(&file_path, PASSWORD.to_string())
+        encryptor.lock(&file_path, PASSWORD.to_string())
             .await.unwrap();
 
         // 读取 trailer
@@ -294,8 +294,8 @@ mod tests {
 
         assert!(trailer.is_some(), "应找到 trailer");
 
-        let (locker_id, tag) = trailer.unwrap();
-        assert_eq!(&locker_id, b"CC20");
+        let (encryptor_id, tag) = trailer.unwrap();
+        assert_eq!(&encryptor_id, b"CC20");
         assert_eq!(tag.len(), 32);
 
         // 验证 trailer

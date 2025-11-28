@@ -1,5 +1,5 @@
 use super::base::{
-    Locker
+    Encryptor
 };
 use async_trait::async_trait;
 use std::path::Path;
@@ -7,17 +7,17 @@ use std::path::PathBuf;
 
 const REPLACE_FILE_LEN: u64 = 1024;
 
-pub struct SimpleLocker;
+pub struct SimpleEncryptor;
 
-impl SimpleLocker {
+impl SimpleEncryptor {
     pub fn new() -> Self {
         Self {}
     }
 }
 
 #[async_trait]
-impl Locker for SimpleLocker {
-    fn locker_id(&self) -> [u8;4] { *b"SIMP" }
+impl Encryptor for SimpleEncryptor {
+    fn encryptor_id(&self) -> [u8;4] { *b"SIMP" }
 
     async fn lock_inner(&self, filepath: PathBuf, _password: String) -> tokio::io::Result<()> {
         file_lock_unlock_async(&filepath).await
@@ -81,34 +81,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_simple_locker_lock_unlock() {
-        let path = unique_path("simple_locker");
+    async fn test_simple_encryptor_lock_unlock() {
+        let path = unique_path("simple_encryptor");
         let original = b"the quick brown fox jumps".to_vec();
         fs::write(&path, &original).await.unwrap();
 
-        let locker = SimpleLocker;
+        let encryptor = SimpleEncryptor;
         let pwd = "s3cr3t".to_string();
 
         // lock
-        locker.lock(&path, pwd.clone()).await.unwrap();
+        encryptor.lock(&path, pwd.clone()).await.unwrap();
 
         // should be locked
-        let locked = locker.is_locked(path.clone()).await.unwrap();
+        let locked = encryptor.is_locked(path.clone()).await.unwrap();
         assert!(locked, "file should report locked after lock()");
 
         // unlocking with wrong password should error
-        let wrong = locker.unlock(&path, "bad".to_string()).await;
+        let wrong = encryptor.unlock(&path, "bad".to_string()).await;
         assert!(wrong.is_err(), "unlock with wrong password should fail");
 
         // unlock with correct password 这里报错
-        locker.unlock(&path, pwd.clone()).await.unwrap();
+        encryptor.unlock(&path, pwd.clone()).await.unwrap();
 
         // file content restored
         let data = fs::read(&path).await.unwrap();
         assert_eq!(data, original, "content should match original after unlock");
 
         // not locked anymore
-        let locked2 = locker.is_locked(path.clone()).await.unwrap();
+        let locked2 = encryptor.is_locked(path.clone()).await.unwrap();
         assert!(!locked2, "file should not be locked after unlock");
 
         fs::remove_file(&path).await.unwrap();

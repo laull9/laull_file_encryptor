@@ -1,5 +1,5 @@
 [package]
-name = "rust_laull_filelocker"
+name = "rust_laull_fileencryptor"
 version = "1.1.0"
 edition = "2024"
 
@@ -41,7 +41,7 @@ strip = true           # 移除调试符号（release模式下有效）
 debug = false          # 关闭调试信息
 
 [package.metadata.bundle]
-name = "rust_laull_filelocker"
-identifier = "com.laull.filelocker"
+name = "rust_laull_fileencryptor"
+identifier = "com.laull.fileencryptor"
 
 icon = ["assets/ico/l.ico", "assets/ico/l.png"]

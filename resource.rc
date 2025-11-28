@@ -14,8 +14,8 @@ BLOCK "000004b0"
 {
 VALUE "ProductVersion", "1.1.0"
 VALUE "FileVersion", "1.1.0"
-VALUE "FileDescription", "rust_laull_filelocker"
-VALUE "ProductName", "rust_laull_filelocker"
+VALUE "FileDescription", "rust_laull_fileencryptor"
+VALUE "ProductName", "rust_laull_fileencryptor"
 }
 }
 BLOCK "VarFileInfo" {

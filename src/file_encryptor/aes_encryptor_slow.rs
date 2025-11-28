@@ -1,5 +1,5 @@
 use super::base::{
-    Locker,
+    Encryptor,
     read_trailer_if_exists,
     remove_trailer,
     verify_trailer,
@@ -36,11 +36,11 @@ type Aes256Ctr = Ctr128BE<Aes256>;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub struct AesLocker_slow;
+pub struct AesEncryptor_slow;
 
-impl AesLocker_slow {
+impl AesEncryptor_slow {
     pub fn new() -> Self {
-        AesLocker_slow
+        AesEncryptor_slow
     }
 
     /// 从密码和盐派生加密密钥（PBKDF2-HMAC-SHA256）
@@ -141,7 +141,7 @@ impl AesLocker_slow {
                 let key_copy = key;
                 join_set.spawn(async move {
                     let mut chunk = buf;
-                    AesLocker_slow::process_ctr_chunk(&mut chunk, &key_copy, &iv, start_block)?;
+                    AesEncryptor_slow::process_ctr_chunk(&mut chunk, &key_copy, &iv, start_block)?;
                     Ok::<_, IoError>((chunk_id, chunk))
                 });
                 active_tasks += 1;
@@ -385,15 +385,15 @@ impl AesLocker_slow {
     }
 }
 
-impl Default for AesLocker_slow {
+impl Default for AesEncryptor_slow {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl Locker for AesLocker_slow {
-    fn locker_id(&self) -> [u8; 4] {
+impl Encryptor for AesEncryptor_slow {
+    fn encryptor_id(&self) -> [u8; 4] {
         LOCKER_ID_PARALLEL
     }
 
@@ -409,27 +409,27 @@ impl Locker for AesLocker_slow {
 
     async fn unlock(&self, filepath: PathBuf, password: String) -> tokio::io::Result<()> {
         let trailer = read_trailer_if_exists(&filepath).await?;
-        let Some((locker_id, _)) = trailer else {
+        let Some((encryptor_id, _)) = trailer else {
             return Err(tokio::io::Error::new(
                 tokio::io::ErrorKind::InvalidData,
                 "File is not locked",
             ));
         };
 
-        if locker_id == LOCKER_ID_PARALLEL {
+        if encryptor_id == LOCKER_ID_PARALLEL {
             if !verify_trailer(&filepath, LOCKER_ID_PARALLEL, &password).await? {
                 return Err(tokio::io::Error::new(
                     tokio::io::ErrorKind::InvalidData,
-                    "Wrong password or mismatched locker",
+                    "Wrong password or mismatched encryptor",
                 ));
             }
             remove_trailer(&filepath).await?;
             self.unlock_inner(filepath, password).await
-        } else if locker_id == LOCKER_ID_LEGACY {
+        } else if encryptor_id == LOCKER_ID_LEGACY {
             if !verify_trailer(&filepath, LOCKER_ID_LEGACY, &password).await? {
                 return Err(tokio::io::Error::new(
                     tokio::io::ErrorKind::InvalidData,
-                    "Wrong password or mismatched legacy locker",
+                    "Wrong password or mismatched legacy encryptor",
                 ));
             }
             remove_trailer(&filepath).await?;
@@ -437,7 +437,7 @@ impl Locker for AesLocker_slow {
         } else {
             Err(tokio::io::Error::new(
                 tokio::io::ErrorKind::InvalidData,
-                "Unknown AES locker identifier",
+                "Unknown AES encryptor identifier",
             ))
         }
     }
@@ -458,7 +458,7 @@ mod tests {
     use super::*;
     use tokio::fs;
     use tokio::time::Instant;
-    use crate::file_locker::base::write_trailer;
+    use crate::file_encryptor::base::write_trailer;
 
     fn unique_path(name: &str) -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
@@ -472,14 +472,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_unlock_file_basic() {
-        let locker = AesLocker_slow::new();
+        let encryptor = AesEncryptor_slow::new();
         let password = "test_password_123";
 
         let temp_file = unique_path("aes_test_basic");
         let original_content = b"Hello, this is a test file content!";
         fs::write(&temp_file, original_content).await.unwrap();
 
-        locker
+        encryptor
             .lock_inner(temp_file.clone(), password.to_string())
             .await
             .expect("Failed to lock file");
@@ -487,7 +487,7 @@ mod tests {
         let encrypted_content = fs::read(&temp_file).await.unwrap();
         assert_ne!(&encrypted_content, original_content);
 
-        locker
+        encryptor
             .unlock_inner(temp_file.clone(), password.to_string())
             .await
             .expect("Failed to unlock file");
@@ -500,18 +500,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_unlock_empty_file() {
-        let locker = AesLocker_slow::new();
+        let encryptor = AesEncryptor_slow::new();
         let password = "empty_file_pwd";
 
         let temp_file = unique_path("aes_test_empty");
         fs::write(&temp_file, b"").await.unwrap();
 
-        locker
+        encryptor
             .lock_inner(temp_file.clone(), password.to_string())
             .await
             .expect("Failed to lock empty file");
 
-        locker
+        encryptor
             .unlock_inner(temp_file.clone(), password.to_string())
             .await
             .expect("Failed to unlock empty file");
@@ -524,19 +524,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_unlock_large_file() {
-        let locker = AesLocker_slow::new();
+        let encryptor = AesEncryptor_slow::new();
         let password = "large_file_pwd";
 
         let temp_file = unique_path("aes_test_large");
         let large_content: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();
         fs::write(&temp_file, &large_content).await.unwrap();
 
-        locker
+        encryptor
             .lock_inner(temp_file.clone(), password.to_string())
             .await
             .expect("Failed to lock large file");
 
-        locker
+        encryptor
             .unlock_inner(temp_file.clone(), password.to_string())
             .await
             .expect("Failed to unlock large file");
@@ -549,7 +549,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_file_wrong_password_unlock_fails() {
-        let locker = AesLocker_slow::new();
+        let encryptor = AesEncryptor_slow::new();
         let password = "correct_pwd";
         let wrong_password = "wrong_pwd";
 
@@ -557,12 +557,12 @@ mod tests {
         let original_content = b"Secret content that should not be readable with wrong password";
         fs::write(&temp_file, original_content).await.unwrap();
 
-        locker
+        encryptor
             .lock_inner(temp_file.clone(), password.to_string())
             .await
             .expect("Failed to lock file");
 
-        let result = locker
+        let result = encryptor
             .unlock_inner(temp_file.clone(), wrong_password.to_string())
             .await;
 
@@ -579,19 +579,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_unlock_binary_file() {
-        let locker = AesLocker_slow::new();
+        let encryptor = AesEncryptor_slow::new();
         let password = "binary_file_pwd";
 
         let temp_file = unique_path("aes_test_binary");
         let binary_content: Vec<u8> = (0..=255).cycle().take(10000).collect();
         fs::write(&temp_file, &binary_content).await.unwrap();
 
-        locker
+        encryptor
             .lock_inner(temp_file.clone(), password.to_string())
             .await
             .expect("Failed to lock binary file");
 
-        locker
+        encryptor
             .unlock_inner(temp_file.clone(), password.to_string())
             .await
             .expect("Failed to unlock binary file");
@@ -604,7 +604,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_unlock_file_multiple_times() {
-        let locker = AesLocker_slow::new();
+        let encryptor = AesEncryptor_slow::new();
         let password = "repeat_pwd";
 
         let temp_file = unique_path("aes_test_repeat");
@@ -613,12 +613,12 @@ mod tests {
         for i in 0..3 {
             fs::write(&temp_file, original_content).await.unwrap();
 
-            locker
+            encryptor
                 .lock_inner(temp_file.clone(), password.to_string())
                 .await
                 .expect(&format!("Failed to lock file in cycle {i}"));
 
-            locker
+            encryptor
                 .unlock_inner(temp_file.clone(), password.to_string())
                 .await
                 .expect(&format!("Failed to unlock file in cycle {i}"));
@@ -632,19 +632,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_file_with_unicode_password() {
-        let locker = AesLocker_slow::new();
+        let encryptor = AesEncryptor_slow::new();
         let password = "密码🔐中文テスト";
 
         let temp_file = unique_path("aes_test_unicode");
         let content = "Unicode password test: 你好世界";
         fs::write(&temp_file, content).await.unwrap();
 
-        locker
+        encryptor
             .lock_inner(temp_file.clone(), password.to_string())
             .await
             .expect("Failed to lock file with unicode password");
 
-        locker
+        encryptor
             .unlock_inner(temp_file.clone(), password.to_string())
             .await
             .expect("Failed to unlock file with unicode password");
@@ -657,14 +657,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_file_content_structure() {
-        let locker = AesLocker_slow::new();
+        let encryptor = AesEncryptor_slow::new();
         let password = "structure_test";
 
         let temp_file = unique_path("aes_test_structure");
         let content = b"Test content for structure verification";
         fs::write(&temp_file, content).await.unwrap();
 
-        locker
+        encryptor
             .lock_inner(temp_file.clone(), password.to_string())
             .await
             .expect("Failed to lock file");
@@ -678,7 +678,7 @@ mod tests {
             min_size
         );
 
-        locker
+        encryptor
             .unlock_inner(temp_file.clone(), password.to_string())
             .await
             .expect("Failed to unlock file");
@@ -688,19 +688,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_file_with_special_characters() {
-        let locker = AesLocker_slow::new();
+        let encryptor = AesEncryptor_slow::new();
         let password = "special!@#$%^&*()";
 
         let temp_file = unique_path("aes_test_special");
         let content = "Content with special chars: !@#$%^&*()[]{}|;:<>?,./";
         fs::write(&temp_file, content).await.unwrap();
 
-        locker
+        encryptor
             .lock_inner(temp_file.clone(), password.to_string())
             .await
             .expect("Failed to lock file");
 
-        locker
+        encryptor
             .unlock_inner(temp_file.clone(), password.to_string())
             .await
             .expect("Failed to unlock file");
@@ -713,19 +713,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_file_preserves_all_bytes() {
-        let locker = AesLocker_slow::new();
+        let encryptor = AesEncryptor_slow::new();
         let password = "all_bytes_pwd";
 
         let temp_file = unique_path("aes_test_allbytes");
         let all_bytes: Vec<u8> = (0..=255).collect();
         fs::write(&temp_file, &all_bytes).await.unwrap();
 
-        locker
+        encryptor
             .lock_inner(temp_file.clone(), password.to_string())
             .await
             .expect("Failed to lock file");
 
-        locker
+        encryptor
             .unlock_inner(temp_file.clone(), password.to_string())
             .await
             .expect("Failed to unlock file");
@@ -754,7 +754,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_encrypt_decrypt_large_2g() {
-        let locker = AesLocker_slow::new();
+        let encryptor = AesEncryptor_slow::new();
         let password = "test_password_123";
 
         let src = PathBuf::from("test_large.bin");
@@ -765,7 +765,7 @@ mod tests {
         assert_eq!(fs::metadata(&src).await.unwrap().len(), size);
 
         let start = Instant::now();
-        locker.lock_inner(src.clone(), password.to_string()).await.unwrap();
+        encryptor.lock_inner(src.clone(), password.to_string()).await.unwrap();
         let enc_time = start.elapsed().as_secs_f64();
         let encrypted_size = fs::metadata(&src).await.unwrap().len();
         println!(
@@ -776,7 +776,7 @@ mod tests {
         );
 
         let start = Instant::now();
-        locker.unlock_inner(src.clone(), password.to_string()).await.unwrap();
+        encryptor.unlock_inner(src.clone(), password.to_string()).await.unwrap();
         let dec_time = start.elapsed().as_secs_f64();
         println!(
             "Decrypted 2GB in {:.3}s, speed = {:.2} MB/s",
@@ -790,7 +790,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_unlocks_legacy_files() {
-        let locker = AesLocker_slow::new();
+        let encryptor = AesEncryptor_slow::new();
         let password = "legacy_pwd";
         let temp_file = unique_path("aes_test_legacy");
         let original_content = b"Legacy CBC compatibility";
@@ -798,7 +798,7 @@ mod tests {
 
         let mut tmp = temp_file.clone();
         tmp.set_extension("aes_tmp");
-        locker
+        encryptor
             .encrypt_stream_to_file_cbc(&temp_file, &tmp, password)
             .await
             .unwrap();
@@ -807,7 +807,7 @@ mod tests {
             .await
             .unwrap();
 
-        locker
+        encryptor
             .unlock(temp_file.clone(), password.to_string())
             .await
             .expect("unlock should support legacy files");

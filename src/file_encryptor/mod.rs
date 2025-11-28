@@ -1,12 +1,12 @@
 pub mod base;
 pub use base::DirLockManager;
-pub mod simple_locker;
-pub use simple_locker::SimpleLocker;
-pub mod aes_locker;
-pub use aes_locker::AesLocker;
-pub mod chacha20_locker;
-pub use chacha20_locker::ChaChaLocker;
-pub mod namelocker;
+pub mod simple_encryptor;
+pub use simple_encryptor::SimpleEncryptor;
+pub mod aes_encryptor;
+pub use aes_encryptor::AesEncryptor;
+pub mod chacha20_encryptor;
+pub use chacha20_encryptor::ChaChaEncryptor;
+pub mod nameencryptor;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LockMethod {
@@ -16,16 +16,16 @@ pub enum LockMethod {
 }
 
 impl LockMethod {
-    pub fn new_locker_manager(&self, dir_path: Vec<String>, password: String) -> DirLockManager {
+    pub fn new_encryptor_manager(&self, dir_path: Vec<String>, password: String) -> DirLockManager {
         match self {
             LockMethod::Simple => {
-                DirLockManager::new(dir_path, password, SimpleLocker::new())
+                DirLockManager::new(dir_path, password, SimpleEncryptor::new())
             }
             LockMethod::Aes => {
-                DirLockManager::new(dir_path, password, AesLocker::new())
+                DirLockManager::new(dir_path, password, AesEncryptor::new())
             }
             LockMethod::Chacha20 => {
-                DirLockManager::new(dir_path, password, ChaChaLocker::new())
+                DirLockManager::new(dir_path, password, ChaChaEncryptor::new())
             }
         }
     }

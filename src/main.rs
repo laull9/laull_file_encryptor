@@ -1,5 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-mod file_locker;
+mod file_encryptor;
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -42,9 +42,9 @@ enum Operation {
 }
 
 #[derive(Clone)]
-struct FileLockerApp {
-    locker_method: file_locker::LockMethod,
-    locker_manager: Option<Arc<file_locker::DirLockManager>>,
+struct FileEncryptorApp {
+    encryptor_method: file_encryptor::LockMethod,
+    encryptor_manager: Option<Arc<file_encryptor::DirLockManager>>,
     selected_files: Arc<Mutex< Vec<String >>>,
     password: String,
     operation: Operation,
@@ -61,7 +61,7 @@ struct FileLockerApp {
     err_messages: Arc<Mutex<Vec<String>>>,
 }
 
-impl FileLockerApp {
+impl FileEncryptorApp {
     fn new(_ctx: &egui::Context) -> Self {
 
         let custom_font_data = include_bytes!("../assets/font/LXGWWenKaiLite-Regular.ttf");
@@ -85,8 +85,8 @@ impl FileLockerApp {
         _ctx.set_visuals(egui::Visuals::light());
 
         Self {
-            locker_method: file_locker::LockMethod::Simple,
-            locker_manager: None,
+            encryptor_method: file_encryptor::LockMethod::Simple,
+            encryptor_manager: None,
             selected_files: Arc::new(Mutex::new(Vec::new())),
             password: "".to_string(),
             operation: Operation::None,
@@ -149,7 +149,7 @@ impl FileLockerApp {
 
         let paths = self.selected_files.lock().unwrap().clone();
         let password = 
-            if self.locker_method == file_locker::LockMethod::Simple{
+            if self.encryptor_method == file_encryptor::LockMethod::Simple{
                 SIMPLE_LOCK_DEFAULT_PASSWORD.to_string()
             }else{
                 self.password.clone()
@@ -161,12 +161,12 @@ impl FileLockerApp {
         }
 
         let manager = Arc::new(
-            self.locker_method.new_locker_manager(
+            self.encryptor_method.new_encryptor_manager(
                 paths,
                 password,
         ));
 
-        self.locker_manager = Some(manager);
+        self.encryptor_manager = Some(manager);
         self.is_working = true;
         self.total_count = 0;
         self.done_count = 0;
@@ -181,7 +181,7 @@ impl FileLockerApp {
         }
         self.operation = Operation::Locking;
         self.timer = Some(Timer::new());
-        let manager = self.locker_manager.clone();
+        let manager = self.encryptor_manager.clone();
         let process_rename_file = self.ui_process_rename_file;
         let process_rename_dir =  self.ui_process_rename_dir;
         let err_messages = self.err_messages.clone();
@@ -204,7 +204,7 @@ impl FileLockerApp {
         }
         self.operation = Operation::Unlocking;
         self.timer = Some(Timer::new());
-        let manager = self.locker_manager.clone();
+        let manager = self.encryptor_manager.clone();
         let err_messages = self.err_messages.clone();
         // 后台执行
         if let Some(manager) = manager{
@@ -218,13 +218,13 @@ impl FileLockerApp {
 
     fn update_progress(&mut self) {
         // 进度更新
-        if self.locker_manager.is_some() {
-            self.total_count = self.locker_manager.as_ref().unwrap().get_total_count();
-            self.done_count = self.locker_manager.as_ref().unwrap().get_done_count();
-            self.err_count = self.locker_manager.as_ref().unwrap().get_err_count();
+        if self.encryptor_manager.is_some() {
+            self.total_count = self.encryptor_manager.as_ref().unwrap().get_total_count();
+            self.done_count = self.encryptor_manager.as_ref().unwrap().get_done_count();
+            self.err_count = self.encryptor_manager.as_ref().unwrap().get_err_count();
             
             if self.total_count <= self.done_count + self.err_count && 
-                self.locker_manager.as_ref().unwrap().is_done() 
+                self.encryptor_manager.as_ref().unwrap().is_done() 
             {
                 self.operation_complete();
             }
@@ -251,7 +251,7 @@ impl FileLockerApp {
     }
 }
 
-impl eframe::App for FileLockerApp {
+impl eframe::App for FileEncryptorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.update_progress();
 
@@ -316,7 +316,7 @@ impl eframe::App for FileLockerApp {
             ui.horizontal(|ui| {
                 ui.label("密码:");
                 // 简单加密无密码
-                if self.locker_method == file_locker::LockMethod::Simple{
+                if self.encryptor_method == file_encryptor::LockMethod::Simple{
                     ui.add_enabled(false,
                     egui::TextEdit::singleline(&mut "快速加密无密码，带密码加密需用其他模式")
                 );
@@ -353,18 +353,18 @@ impl eframe::App for FileLockerApp {
 
                 ComboBox::from_label("")
                     .width(200.0)
-                    .selected_text(self.locker_method.display_name()) // 使用枚举的显示名称
+                    .selected_text(self.encryptor_method.display_name()) // 使用枚举的显示名称
                     .show_ui(ui, |ui| {
                         // 为每个枚举变体添加一个选项
-                        ui.selectable_value(&mut self.locker_method, 
-                            file_locker::LockMethod::Simple, 
-                            file_locker::LockMethod::Simple.display_name());
-                        ui.selectable_value(&mut self.locker_method, 
-                            file_locker::LockMethod::Aes, 
-                            file_locker::LockMethod::Aes.display_name());
-                        ui.selectable_value(&mut self.locker_method, 
-                            file_locker::LockMethod::Chacha20, 
-                            file_locker::LockMethod::Chacha20.display_name());
+                        ui.selectable_value(&mut self.encryptor_method, 
+                            file_encryptor::LockMethod::Simple, 
+                            file_encryptor::LockMethod::Simple.display_name());
+                        ui.selectable_value(&mut self.encryptor_method, 
+                            file_encryptor::LockMethod::Aes, 
+                            file_encryptor::LockMethod::Aes.display_name());
+                        ui.selectable_value(&mut self.encryptor_method, 
+                            file_encryptor::LockMethod::Chacha20, 
+                            file_encryptor::LockMethod::Chacha20.display_name());
                     });
                 
                 if ui.add_enabled(!self.is_working,
@@ -457,6 +457,6 @@ async fn main() -> Result<(), eframe::Error> {
         "文件加密解密工具@laull",
         options,
         Box::new(|_cc| 
-            Ok(Box::new(FileLockerApp::new(&_cc.egui_ctx)))),
+            Ok(Box::new(FileEncryptorApp::new(&_cc.egui_ctx)))),
     )
 }

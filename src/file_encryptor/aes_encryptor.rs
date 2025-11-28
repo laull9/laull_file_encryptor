@@ -1,4 +1,4 @@
-use super::base::Locker;
+use super::base::Encryptor;
 
 use async_trait::async_trait;
 use ring::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey};
@@ -24,9 +24,9 @@ const DEFAULT_CHUNK_SIZE: usize = 512 * 1024; // 512KiB keeps memory modest, thr
 const MAX_CHUNK_SIZE: usize = 4 * 1024 * 1024; // upper guardrail for corrupted headers
 const PBKDF2_ITERATIONS: u32 = 200_000;
 
-pub struct AesLocker;
+pub struct AesEncryptor;
 
-impl AesLocker {
+impl AesEncryptor {
     pub fn new() -> Self {
         Self
     }
@@ -196,15 +196,15 @@ impl AesLocker {
     }
 }
 
-impl Default for AesLocker {
+impl Default for AesEncryptor {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl Locker for AesLocker {
-    fn locker_id(&self) -> [u8; 4] {
+impl Encryptor for AesEncryptor {
+    fn encryptor_id(&self) -> [u8; 4] {
         LOCKER_ID
     }
 
@@ -268,8 +268,8 @@ impl FileHeader {
     fn random(chunk_size: u32) -> IoResult<Self> {
         let mut salt = [0u8; SALT_LEN];
         let mut nonce_prefix = [0u8; NONCE_PREFIX_LEN];
-        AesLocker::rng_fill(&mut salt)?;
-        AesLocker::rng_fill(&mut nonce_prefix)?;
+        AesEncryptor::rng_fill(&mut salt)?;
+        AesEncryptor::rng_fill(&mut nonce_prefix)?;
         Self::new(salt, nonce_prefix, chunk_size)
     }
 
@@ -295,16 +295,16 @@ mod tests {
 
     #[tokio::test]
     async fn round_trip_small_file() {
-        let locker = AesLocker::new();
+        let encryptor = AesEncryptor::new();
         let password = "let_me_in";
         let path = unique_path("small");
         fs::write(&path, b"hello world").await.unwrap();
 
-        locker
+        encryptor
             .lock_inner(path.clone(), password.to_string())
             .await
             .unwrap();
-        locker
+        encryptor
             .unlock_inner(path.clone(), password.to_string())
             .await
             .unwrap();
@@ -316,17 +316,17 @@ mod tests {
 
     #[tokio::test]
     async fn round_trip_large_file() {
-        let locker = AesLocker::new();
+        let encryptor = AesEncryptor::new();
         let password = "super_secure";
         let path = unique_path("large");
         let payload: Vec<u8> = (0..(2 * 1024 * 1024)).map(|n| (n % 251) as u8).collect();
         fs::write(&path, &payload).await.unwrap();
 
-        locker
+        encryptor
             .lock_inner(path.clone(), password.to_string())
             .await
             .unwrap();
-        locker
+        encryptor
             .unlock_inner(path.clone(), password.to_string())
             .await
             .unwrap();
@@ -338,16 +338,16 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_password_fails() {
-        let locker = AesLocker::new();
+        let encryptor = AesEncryptor::new();
         let path = unique_path("wrong_pwd");
         fs::write(&path, b"classified").await.unwrap();
 
-        locker
+        encryptor
             .lock_inner(path.clone(), "correct".to_string())
             .await
             .unwrap();
 
-        let result = locker
+        let result = encryptor
             .unlock_inner(path.clone(), "incorrect".to_string())
             .await;
         assert!(result.is_err());
