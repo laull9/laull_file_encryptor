@@ -113,10 +113,11 @@ impl FileEncryptorApp {
         tokio::spawn(async move {
             if let Some(handle) = files.await {
                 let mut s_files_lock = s_files.lock().unwrap();
-                *s_files_lock = handle.iter()
-                .map(|f| 
-                    f.path().to_string_lossy().into_owned())
-                .collect();
+                for i in handle.iter()
+                {
+                    let f = i.path().to_string_lossy().into_owned();
+                    (*s_files_lock).push(f);
+                }
                 println!("Selected files");
             }
         });
@@ -130,7 +131,7 @@ impl FileEncryptorApp {
             if let Some(handle) = folder.await {
                 let path = handle.path().to_string_lossy();
                 let mut s_files_lock = s_files.lock().unwrap();
-                *s_files_lock = vec![path.clone().into_owned()];
+                (*s_files_lock).push(path.clone().into_owned());
 
                 println!("Selected folder: {:?}", path);
             }
@@ -255,6 +256,19 @@ impl eframe::App for FileEncryptorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.update_progress();
 
+        let dropped_files = ctx.input(|i| i.raw.dropped_files.clone());
+        if !dropped_files.is_empty() {
+            let mut s_files_lock = self.selected_files.lock().unwrap();
+            for i in dropped_files.iter()
+            {
+                if let Some(p) = i.path.as_ref(){
+                    let f = p.to_string_lossy().into_owned();
+                    (*s_files_lock).push(f);
+                }
+            }
+            println!("Dropped files");
+        }
+
         egui::Area::new( "floating_toggle".into())
             .fixed_pos(egui::pos2(ctx.available_rect().max.x - 30.0, 10.0)) 
             .show(ctx, |ui| {
@@ -289,6 +303,10 @@ impl eframe::App for FileEncryptorApp {
                         }
                         if ui.button("选择文件夹").clicked() {
                             self.select_folder();
+                        }
+                        if ui.button("清空选择").clicked() {
+                            let mut files = self.selected_files.lock().unwrap();
+                            files.clear();
                         }
                     });
 
