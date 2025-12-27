@@ -31,6 +31,7 @@ rfd = "0.16.0"
 base64 = "0.22.1"
 winres = "0.1.12"
 image = "0.24.0"
+dark-light = "2.0.0"
 
 [profile.release]
 # opt-level = "z"        # 优先优化体积（比"3"更小，牺牲部分速度）

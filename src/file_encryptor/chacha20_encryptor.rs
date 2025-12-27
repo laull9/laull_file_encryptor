@@ -13,12 +13,9 @@ use std::convert::TryInto;
 // 常量（可根据需要调整）
 const PLAINTEXT_CHUNK_SIZE: usize = 64 * 1024; // 每块 64KiB 明文
 const AEAD_TAG_LEN: usize = 16; // ChaCha20-Poly1305 tag 长度
-const NONCE_PREFIX_LEN: usize = 4; // 我们用 4 字节随机前缀 + 8 字节计数器 -> 12 字节 nonce
+const NONCE_PREFIX_LEN: usize = 4; // 4 字节随机前缀 + 8 字节计数器 -> 12 字节 nonce
 const NONCE_LEN: usize = 12;
-const HKDF_SALT: &[u8] = b"cha-cha-encryptor-salt"; // 派生盐（可固定或参数化）
-
-// 需要你已有的 trait & helper 函数（write_trailer, remove_trailer, ...）在同一模块可见
-// 假设 Encryptor trait 如你已给出（encryptor_id, lock_inner, unlock_inner 等）。
+const HKDF_SALT: &[u8] = b"laull-cha-cha-encryptor"; // 派生盐
 
 pub struct ChaChaEncryptor;
 

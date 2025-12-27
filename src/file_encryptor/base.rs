@@ -24,86 +24,105 @@ const TRAILER_LEN: usize = TRAITER_ID_LEN + TRAITER_TAG_LEN + TRAILER_FINISH_TAG
 
 const HEADER_LEN: usize = 1024;    // read first 1KB to compute tag
 
-pub async fn scan_files_iterative(paths: &Vec<String>, err_buf: Arc<AsyncMutex<Vec<String>>>) -> tokio::io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
-    let mut directories_to_process = VecDeque::new();
+#[derive(Clone, Copy)]
+pub struct ScanOptions {
+    pub(crate) include_input_dirs: bool,
+    pub(crate) recursive: bool,
+}
+
+pub async fn scan_files_iterative(
+    paths: &Vec<String>,
+    scan_options: ScanOptions,
+    err_buf: Arc<AsyncMutex<Vec<String>>>,
+) -> tokio::io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     let mut found_files = Vec::new();
     let mut found_dirs = Vec::new();
 
-    let mut input_dirs = Vec::new(); // 仅用于最后过滤
+    let mut queue = VecDeque::new();       // BFS 队列
+    let mut visited = HashSet::new();      // 防止递归重复
 
-    // 遍历传入的路径
+    let mut input_dirs = HashSet::new();   // 用于过滤输入目录
+
+    /* ---------- 初始化输入路径 ---------- */
     for path_str in paths {
         let path = Path::new(path_str).to_path_buf();
 
-        let metadata = match fs::metadata(&path).await {
-            Ok(meta) => meta,
+        let meta = match fs::metadata(&path).await {
+            Ok(m) => m,
             Err(e) => {
-                let err = format!("路径 '{}' 不存在或无法访问: {}", path.display(), e);
-                error!("{}", err);
-                err_buf.lock().await.push(err);
+                err_buf.lock().await.push(format!(
+                    "路径 '{}' 无法访问: {}", path.display(), e
+                ));
                 continue;
             }
         };
 
-        if metadata.is_dir() {
-            directories_to_process.push_back(path.clone());
-            found_dirs.push(path.clone());
-            input_dirs.push(path);  // 记录输入目录
-        } else if metadata.is_file() {
+        if meta.is_file() {
             found_files.push(path);
+        } else if meta.is_dir() {
+            let canon = path.canonicalize().unwrap_or(path.clone());
+
+            input_dirs.insert(canon.clone());
+            visited.insert(canon.clone());
+            queue.push_back(canon.clone());
+
+            if scan_options.include_input_dirs {
+                found_dirs.push(canon);
+            }
         }
     }
 
-    // 遍历所有目录
-    while let Some(current_dir) = directories_to_process.pop_front() {
+    /* ---------- BFS 扫描 ---------- */
+    while let Some(current_dir) = queue.pop_front() {
         let mut entries = match fs::read_dir(&current_dir).await {
-            Ok(entries) => entries,
+            Ok(e) => e,
             Err(e) => {
-                let err = format!("无法读取目录 '{}': {}", current_dir.display(), e);
-                error!("{}", err);
-                err_buf.lock().await.push(err);
+                err_buf.lock().await.push(format!(
+                    "无法读取目录 '{}': {}", current_dir.display(), e
+                ));
                 continue;
             }
         };
 
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
-            let metadata = match fs::metadata(&path).await {
-                Ok(meta) => meta,
-                Err(e) => {
-                    let err = format!("无法获取文件元数据 '{}': {}", path.display(), e);
-                    error!("{}", err);
-                    err_buf.lock().await.push(err);
-                    continue;
-                }
+            let meta = match fs::metadata(&path).await {
+                Ok(m) => m,
+                Err(_) => continue,
             };
 
-            if metadata.is_file() {
+            if meta.is_file() {
                 found_files.push(path);
-            } else if metadata.is_dir() {
-                directories_to_process.push_back(path.clone());
-                found_dirs.push(path);
+            } else if meta.is_dir() {
+                // 非递归：完全忽略子目录
+                if !scan_options.recursive {
+                    continue;
+                }
+
+                let canon = path.canonicalize().unwrap_or(path.clone());
+
+                // 递归：去重后继续向下
+                if visited.insert(canon.clone()) {
+                    found_dirs.push(canon.clone());
+                    queue.push_back(canon);
+                }
             }
         }
     }
 
-    // 规范化输入目录后存入 HashSet
-    let input_dirs_set: HashSet<PathBuf> = input_dirs
-        .into_iter()
-        .map(|p| p.canonicalize().unwrap_or(p))
-        .collect();
+    /* ---------- 是否过滤输入目录 ---------- */
+    let final_dirs = if scan_options.include_input_dirs {
+        found_dirs
+    } else {
+        found_dirs
+            .into_iter()
+            .filter(|d| !input_dirs.contains(d))
+            .collect()
+    };
 
-    // 从 found_dirs 中移除恰好等于输入目录的项
-    let filtered_dirs = found_dirs
-        .into_iter()
-        .filter(|dir| {
-            let canon = dir.canonicalize().unwrap_or(dir.clone());
-            !input_dirs_set.contains(&canon)
-        })
-        .collect::<Vec<_>>();
-
-    Ok((found_files, filtered_dirs))
+    Ok((found_files, final_dirs))
 }
+
 
 #[async_trait]
 pub trait Encryptor: Send + Sync + 'static {
@@ -318,6 +337,7 @@ pub struct DirLockManager {
     progress_done: Arc<AtomicU64>,
     progress_err: Arc<AtomicU64>,
     is_done: Arc<AtomicBool>,
+    scan_options: ScanOptions,
 }
 
 impl DirLockManager {
@@ -335,6 +355,10 @@ impl DirLockManager {
             progress_done: Arc::new(AtomicU64::new(0)),
             progress_err: Arc::new(AtomicU64::new(0)),
             is_done: Arc::new(AtomicBool::new(false)),
+            scan_options: ScanOptions {
+                include_input_dirs: false,
+                recursive: true,
+            }
         }
     }
 
@@ -353,7 +377,9 @@ impl DirLockManager {
         let j = self.joinset.clone();
         let err_messages: Arc<AsyncMutex<Vec<String>>> = Arc::new(AsyncMutex::new(Vec::new()));
 
-        let fd = scan_files_iterative(&self.paths, err_messages.clone()).await;
+        let fd = scan_files_iterative(
+            &self.paths, self.scan_options, err_messages.clone()
+        ).await;
         if let Err(e) = &fd {
             let err = format!("扫描目录时出错: {}", e);
             error!("{}", &err);
@@ -382,9 +408,11 @@ impl DirLockManager {
                 // 先获取 permit（或先 inc total，已经预先设置了 total）
                 let _permit = sem.acquire().await.expect("semaphore closed");
 
-                if let Err(e) = encryptor2.lock(&file_path, pwd2.as_ref().clone()).await {
+                if let Err(e) = encryptor2.lock(
+                    &file_path, pwd2.as_ref().clone()
+                ).await {
                     progress_err.fetch_add(1, Ordering::SeqCst);
-                    let err = format!("加密文件时出错: {}", e);
+                    let err = format!("加密文件: {:?}时出错: {}", &file_path, e);
                     error!("{}", &err);
                     err_buf.lock().await.push(err);
                 } else {
@@ -393,7 +421,7 @@ impl DirLockManager {
                 // 加密文件名
                 if process_filename{
                     if let Err(e) = lock_pathname_on_fs(&file_path){
-                        let err = format!("加密文件名时出错: {}", e);
+                        let err = format!("加密文件名: {:?}时出错: {}", &file_path, e);
                         error!("{}", &err);
                         err_buf.lock().await.push(err);
                     }
@@ -407,7 +435,7 @@ impl DirLockManager {
             // 加密文件夹
             for dir in dirs.iter().rev(){
                 if let Err(e) = lock_pathname_on_fs(dir){
-                    let err = format!("加密文件夹出错: {}", e);
+                    let err = format!("加密文件夹: {:?}时出错: {}", &dir, e);
                     error!("{}", &err);
                     err_messages.lock().await.push(err);
                 }
@@ -419,12 +447,14 @@ impl DirLockManager {
 
     pub async fn unlock(& self) -> Vec<String> {
         let j = self.joinset.clone();
-        let err_messages: Arc<AsyncMutex<Vec<String>>> = Arc::new(AsyncMutex::new(Vec::new()));
+        let err_messages: Arc<AsyncMutex<Vec<String>>> = 
+            Arc::new(AsyncMutex::new(Vec::new()));
 
 
-        let fd = scan_files_iterative(&self.paths, err_messages.clone()).await;
+        let fd = scan_files_iterative(
+            &self.paths, self.scan_options, err_messages.clone()).await;
         if let Err(e) = &fd {
-            let err = format!("扫描目录时出错: {:?}", e);
+            let err = format!("扫描目录时出错: {}", e);
             error!("{}", &err);
             err_messages.lock().await.push(err);
             return err_messages.lock().await.to_vec();
@@ -453,18 +483,20 @@ impl DirLockManager {
 
                 if let Err(e) = encryptor2.unlock(&file_path, pwd2.as_ref().clone()).await {
                     progress_err.fetch_add(1, Ordering::SeqCst);
-                    let err = format!("解密文件时出错: {}", e);
+                    let err = format!("解密文件: {:?}时出错: {}", &file_path, e);
                     error!("{}", &err);
                     err_buf.lock().await.push(err);
                 } else {
+                    // 如果解密文件出错，那么不解密文件名
+                    // 解密文件名
+                    if let Err(e) = unlock_pathname_on_fs(&file_path){
+                        let err = format!("解密文件名: {:?}时出错: {}", &file_path, e);
+                        error!("{}", &err);
+                        err_buf.lock().await.push(err); 
+                    }
                     progress_done.fetch_add(1, Ordering::SeqCst);
                 }
-                // 解密文件名
-                if let Err(e) = unlock_pathname_on_fs(&file_path){
-                    let err = format!("加密文件名时出错: {}", e);
-                    error!("{}", &err);
-                    err_buf.lock().await.push(err); 
-                }
+
             });
         }
         // 等待全部完成
@@ -473,7 +505,7 @@ impl DirLockManager {
         // 解密文件夹
         for dir in dirs.iter().rev(){
             if let Err(e) = unlock_pathname_on_fs(dir){
-                let err = format!("解密文件夹出错: {}", e);
+                let err = format!("解密文件夹: {:?}时出错: {}", &dir, e);
                 error!("{}", &err);
                 err_messages.lock().await.push(err);
             }
@@ -496,6 +528,13 @@ impl DirLockManager {
 
     pub fn is_done(&self) -> bool {
         self.is_done.load(Ordering::SeqCst)
+    }
+
+    pub fn set_scan_options(self, options: ScanOptions) -> Self {
+        Self {
+            scan_options: options,
+            ..self
+        }
     }
 
 }
