@@ -7,12 +7,15 @@ pub use aes_encryptor::AesEncryptor;
 pub mod chacha20_encryptor;
 pub use chacha20_encryptor::ChaChaEncryptor;
 pub mod nameencryptor;
+pub mod not_all_encryptor;
+pub use not_all_encryptor::NotAllEncryptor;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LockMethod {
     Simple,
     Aes,
     Chacha20,
+    NotAll,
 }
 
 impl LockMethod {
@@ -27,6 +30,9 @@ impl LockMethod {
             LockMethod::Chacha20 => {
                 DirLockManager::new(dir_path, password, ChaChaEncryptor::new())
             }
+            LockMethod::NotAll => {
+                DirLockManager::new(dir_path, password, NotAllEncryptor::new())
+            }
         }
     }
     pub fn display_name(&self) -> &str {
@@ -34,6 +40,7 @@ impl LockMethod {
             Self::Simple => "快速加密(无密码,非完全加密)",
             Self::Aes => "Aes(有硬件加速会较快,安全)",
             Self::Chacha20 => "Chacha20(无硬件加速,安全)",
+            Self::NotAll => "部分随机加密(无密码)",
         }
     }
 }

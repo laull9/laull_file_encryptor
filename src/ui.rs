@@ -8,6 +8,7 @@ use tracing::{info, error};
 use crate::file_encryptor;
 
 const SIMPLE_LOCK_DEFAULT_PASSWORD: &str = "laull";
+const NOTALL_LOCK_DEFAULT_PASSWORD: &str = "laull_notall";
 
 /// 计时器
 #[derive(Debug, Clone)]
@@ -160,7 +161,11 @@ impl FileEncryptorApp {
         let password = 
             if self.encryptor_method == file_encryptor::LockMethod::Simple{
                 SIMPLE_LOCK_DEFAULT_PASSWORD.to_string()
-            }else{
+            }
+            else if self.encryptor_method == file_encryptor::LockMethod::NotAll{
+                NOTALL_LOCK_DEFAULT_PASSWORD.to_string()
+            }
+            else{
                 self.password.clone()
             };
             
@@ -353,9 +358,11 @@ impl eframe::App for FileEncryptorApp {
             ui.horizontal(|ui| {
                 ui.label("密码:");
                 // 简单加密无密码
-                if self.encryptor_method == file_encryptor::LockMethod::Simple{
+                if self.encryptor_method == file_encryptor::LockMethod::Simple ||
+                    self.encryptor_method == file_encryptor::LockMethod::NotAll
+                {
                     ui.add_enabled(false,
-                    egui::TextEdit::singleline(&mut "快速加密无密码，带密码加密需用其他模式")
+                    egui::TextEdit::singleline(&mut "该加密无密码，带密码加密需用其他模式")
                 );
                 }else{
                     ui.add_enabled(true,
@@ -402,6 +409,9 @@ impl eframe::App for FileEncryptorApp {
                         ui.selectable_value(&mut self.encryptor_method, 
                             file_encryptor::LockMethod::Chacha20, 
                             file_encryptor::LockMethod::Chacha20.display_name());
+                        ui.selectable_value(&mut self.encryptor_method, 
+                            file_encryptor::LockMethod::NotAll, 
+                            file_encryptor::LockMethod::NotAll.display_name());
                     });
                 
                 if ui.add_enabled(!self.is_working,
